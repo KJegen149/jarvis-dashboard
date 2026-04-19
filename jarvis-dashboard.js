@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.4
+// Jarvis Hub Dashboard v0.5
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 const THR = 'https://esm.sh/three@0.160.0';
 
@@ -29,40 +29,48 @@ function parseSTL(buffer) {
   return geo;
 }
 
+const TYPE_LABELS = { '3d_model':'3D Model', svg:'Cricut Model', note:'Notes', other:'Other' };
+
 class JarvisDashboard extends LitElement {
 
   static properties = {
-    hass:           {},
-    _config:        { state: true },
-    _leftOpen:      { state: true },
-    _rightOpen:     { state: true },
-    _logOpen:       { state: true },
-    _activeView:    { state: true },
-    _activeProject: { state: true },
-    _chatInput:     { state: true },
-    _projects:      { state: true },
-    _messages:      { state: true },
-    _log:           { state: true },
-    _sending:       { state: true },
-    _files:         { state: true },
-    _svgUrl:        { state: true },
+    hass:             {},
+    _config:          { state: true },
+    _leftOpen:        { state: true },
+    _rightOpen:       { state: true },
+    _logOpen:         { state: true },
+    _activeView:      { state: true },
+    _activeProject:   { state: true },
+    _chatInput:       { state: true },
+    _projects:        { state: true },
+    _messages:        { state: true },
+    _log:             { state: true },
+    _sending:         { state: true },
+    _files:           { state: true },
+    _svgUrl:          { state: true },
+    _showNewProject:  { state: true },
+    _newProjName:     { state: true },
+    _newProjType:     { state: true },
   };
 
   constructor() {
     super();
-    this._leftOpen      = true;
-    this._rightOpen     = true;
-    this._logOpen       = true;
-    this._activeView    = 'workspace';
-    this._activeProject = null;
-    this._chatInput     = '';
-    this._projects      = [];
-    this._messages      = [];
-    this._log           = [];
-    this._sending       = false;
-    this._files         = [];
-    this._svgUrl        = null;
-    this._three         = null;
+    this._leftOpen       = true;
+    this._rightOpen      = true;
+    this._logOpen        = true;
+    this._activeView     = 'workspace';
+    this._activeProject  = null;
+    this._chatInput      = '';
+    this._projects       = [];
+    this._messages       = [];
+    this._log            = [];
+    this._sending        = false;
+    this._files          = [];
+    this._svgUrl         = null;
+    this._three          = null;
+    this._showNewProject = false;
+    this._newProjName    = '';
+    this._newProjType    = '3d_model';
   }
 
   setConfig(config) {
@@ -131,6 +139,49 @@ class JarvisDashboard extends LitElement {
     }
   }
 
+  _newProject() {
+    this._newProjName = '';
+    this._newProjType = '3d_model';
+    this._showNewProject = true;
+  }
+
+  async _submitNewProject() {
+    const name = this._newProjName.trim();
+    if (!name) return;
+    try {
+      const r = await fetch(`${this._apiUrl}/api/projects`, {
+        method: 'POST', headers: this._apiHeaders,
+        body: JSON.stringify({ name, type: this._newProjType }),
+      });
+      if (r.ok) {
+        const p = await r.json();
+        this._projects = [p, ...this._projects];
+        this._showNewProject = false;
+        await this._selectProject(p);
+      }
+    } catch (_) {}
+  }
+
+  async _deleteProject(id) {
+    if (!confirm('Delete this project and all its files? This cannot be undone.')) return;
+    try {
+      const r = await fetch(`${this._apiUrl}/api/projects/${id}`, {
+        method: 'DELETE', headers: this._apiHeaders,
+      });
+      if (r.ok) {
+        this._projects = this._projects.filter(p => p.id !== id);
+        if (this._activeProject?.id === id) {
+          this._activeProject = null;
+          this._activeView = 'workspace';
+          this._messages = [];
+          this._files = [];
+          this._disposeThree();
+          if (this._svgUrl) { URL.revokeObjectURL(this._svgUrl); this._svgUrl = null; }
+        }
+      }
+    } catch (_) {}
+  }
+
   async _sendChat() {
     const msg = this._chatInput.trim();
     if (!msg || this._sending) return;
@@ -161,24 +212,6 @@ class JarvisDashboard extends LitElement {
       this._messages = [...this._messages, { id: '_e', role: 'jarvis', content: "Can't reach the API." }];
     }
     this._sending = false;
-  }
-
-  async _newProject() {
-    const name = prompt('Project name:');
-    if (!name?.trim()) return;
-    const typeInput = prompt('Type (3d_model / svg / note / other):', 'other');
-    const type = ['3d_model','svg','note','other'].includes(typeInput) ? typeInput : 'other';
-    try {
-      const r = await fetch(`${this._apiUrl}/api/projects`, {
-        method: 'POST', headers: this._apiHeaders,
-        body: JSON.stringify({ name: name.trim(), type }),
-      });
-      if (r.ok) {
-        const p = await r.json();
-        this._projects = [p, ...this._projects];
-        await this._selectProject(p);
-      }
-    } catch (_) {}
   }
 
   _onChatKey(e) {
@@ -351,7 +384,7 @@ class JarvisDashboard extends LitElement {
     .root {
       display: flex; flex-direction: column; height: 100%; min-height: 500px;
       background: var(--bg); border-radius: var(--radius);
-      overflow: hidden; border: 1px solid var(--border);
+      overflow: hidden; border: 1px solid var(--border); position: relative;
     }
     .statusbar {
       display: flex; align-items: center; gap: 10px; padding: 7px 14px;
@@ -447,11 +480,20 @@ class JarvisDashboard extends LitElement {
     .gallery-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 5px; min-height: 0; }
     .gallery-list::-webkit-scrollbar { width: 3px; }
     .gallery-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    .proj-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; cursor: pointer; transition: all .15s; }
+    .proj-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; transition: all .15s; }
     .proj-card:hover  { border-color: var(--accent); }
     .proj-card.active { border-color: var(--accent); background: rgba(0,245,255,.05); }
+    .proj-card-inner  { display: flex; align-items: center; gap: 4px; }
+    .proj-card-info   { flex: 1; min-width: 0; cursor: pointer; }
     .proj-card .pc-name { font-size: .82rem; font-weight: 500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .proj-card .pc-meta { font-size: .68rem; color: var(--text-dim); margin-top: 2px; }
+    .proj-delete {
+      background: none; border: none; cursor: pointer; color: var(--text-dim);
+      font-size: .9rem; padding: 3px 5px; border-radius: 4px; flex-shrink: 0;
+      opacity: 0; transition: opacity .15s, color .15s; line-height: 1;
+    }
+    .proj-card:hover .proj-delete { opacity: 1; }
+    .proj-delete:hover { color: #ff5555; }
     .gallery-empty { font-size: .78rem; color: var(--text-dim); text-align: center; padding: 20px 10px; }
     .gallery-foot { padding: 7px; border-top: 1px solid var(--border); flex-shrink: 0; }
     .new-btn { width: 100%; background: rgba(0,245,255,.08); border: 1px solid var(--accent); border-radius: 6px; color: var(--accent); cursor: pointer; font-size: .78rem; font-weight: 600; padding: 6px; }
@@ -479,6 +521,37 @@ class JarvisDashboard extends LitElement {
     .log-entry.sys  .le-type { background: rgba(255,170,0,.12);  color: #ffaa00; }
     .le-proj { color: var(--text-dim); font-size: .65rem; flex-shrink: 0; }
     .le-text { color: var(--text); flex: 1; }
+
+    /* ── New Project Modal ── */
+    .modal-overlay {
+      position: absolute; inset: 0; background: rgba(0,0,0,.75);
+      display: flex; align-items: center; justify-content: center; z-index: 200;
+    }
+    .modal {
+      background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius);
+      padding: 18px; width: 250px; display: flex; flex-direction: column; gap: 10px;
+      box-shadow: 0 0 40px rgba(0,245,255,.12);
+    }
+    .modal-title { font-size: .72rem; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
+    .modal input, .modal select {
+      width: 100%; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-family: inherit; font-size: .82rem; padding: 7px 9px;
+    }
+    .modal input:focus, .modal select:focus { outline: none; border-color: var(--accent); }
+    .modal select option { background: var(--surface); }
+    .modal-btns { display: flex; gap: 8px; margin-top: 2px; }
+    .modal-btn-cancel {
+      flex: 1; padding: 7px; border-radius: 6px; cursor: pointer;
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text-dim); font-size: .78rem; font-weight: 600;
+    }
+    .modal-btn-cancel:hover { border-color: var(--accent); color: var(--text); }
+    .modal-btn-save {
+      flex: 1; padding: 7px; border-radius: 6px; cursor: pointer;
+      background: var(--accent); border: none; color: #000; font-size: .78rem; font-weight: 700;
+    }
+    .modal-btn-save:hover { opacity: .85; }
+
     @media (max-width: 680px) {
       .root { height: auto; min-height: 400px; }
       .main { flex-direction: column; }
@@ -501,10 +574,17 @@ class JarvisDashboard extends LitElement {
   }
 
   _renderProjCard(p) {
-    const labels = { '3d_model':'3D', svg:'SVG', note:'Note', other:'—' };
-    return html`<div class="proj-card ${this._activeProject?.id===p.id?'active':''}" @click=${()=>this._selectProject(p)}>
-      <div class="pc-name">${p.name}</div>
-      <div class="pc-meta">${labels[p.type]??p.type}</div></div>`;
+    return html`
+      <div class="proj-card ${this._activeProject?.id===p.id?'active':''}">
+        <div class="proj-card-inner">
+          <div class="proj-card-info" @click=${()=>this._selectProject(p)}>
+            <div class="pc-name">${p.name}</div>
+            <div class="pc-meta">${TYPE_LABELS[p.type]??p.type}</div>
+          </div>
+          <button class="proj-delete" title="Delete project"
+            @click=${e=>{e.stopPropagation();this._deleteProject(p.id);}}>🗑</button>
+        </div>
+      </div>`;
   }
 
   _renderLogEntry(e) {
@@ -513,6 +593,30 @@ class JarvisDashboard extends LitElement {
       <span class="le-type">${e.type==='cmd'?'CMD':e.type==='resp'?'RESP':'SYS'}</span>
       ${e.project?html`<span class="le-proj">[${e.project}]</span>`:nothing}
       <span class="le-text">${e.text}</span></div>`;
+  }
+
+  _renderNewProjectModal() {
+    if (!this._showNewProject) return nothing;
+    return html`
+      <div class="modal-overlay" @click=${e=>{ if(e.target===e.currentTarget) this._showNewProject=false; }}>
+        <div class="modal">
+          <div class="modal-title">New Project</div>
+          <input type="text" placeholder="Project name"
+            .value=${this._newProjName}
+            @input=${e=>this._newProjName=e.target.value}
+            @keydown=${e=>e.key==='Enter'&&this._submitNewProject()}>
+          <select @change=${e=>this._newProjType=e.target.value}>
+            <option value="3d_model" ?selected=${this._newProjType==='3d_model'}>3D Model</option>
+            <option value="svg"      ?selected=${this._newProjType==='svg'}>Cricut Model</option>
+            <option value="note"     ?selected=${this._newProjType==='note'}>Notes</option>
+            <option value="other"    ?selected=${this._newProjType==='other'}>Other</option>
+          </select>
+          <div class="modal-btns">
+            <button class="modal-btn-cancel" @click=${()=>this._showNewProject=false}>Cancel</button>
+            <button class="modal-btn-save"   @click=${this._submitNewProject}>Create</button>
+          </div>
+        </div>
+      </div>`;
   }
 
   _renderWorkspaceSurface() {
@@ -528,7 +632,7 @@ class JarvisDashboard extends LitElement {
     } else if (this._activeView === 'svg') {
       body = html`<div class="svg-viewer">${this._svgUrl?html`<img src=${this._svgUrl} alt="SVG preview">`:html`<p class="ws-hint">No SVG uploaded yet.<br>Use ⬆ Upload to add one.</p>`}</div>`;
     } else {
-      body = html`<div class="ws-project-info"><h2>${this._activeProject.name}</h2><p>${this._activeProject.description??'No description'}</p><span class="badge">${this._activeProject.type}</span></div>`;
+      body = html`<div class="ws-project-info"><h2>${this._activeProject.name}</h2><p>${this._activeProject.description??'No description'}</p><span class="badge">${TYPE_LABELS[this._activeProject.type]??this._activeProject.type}</span></div>`;
     }
     return html`${tabs}${body}`;
   }
@@ -541,6 +645,7 @@ class JarvisDashboard extends LitElement {
     return html`
       <input type="file" id="fu" accept=".stl,.svg" style="display:none" @change=${this._onFileSelect}>
       <div class="root">
+        ${this._renderNewProjectModal()}
         <div class="statusbar">
           <span class="logo">Jarvis</span>
           <div class="pulse"></div>
@@ -560,7 +665,8 @@ class JarvisDashboard extends LitElement {
                 ${this._sending?html`<div class="msg jarvis sending"><div class="msg-role">⬡ Jarvis</div>…</div>`:nothing}
               </div>
               <div class="chat-footer">
-                <textarea .value=${this._chatInput} @input=${e=>this._chatInput=e.target.value} @keydown=${this._onChatKey} ?disabled=${this._sending} placeholder="Ask Jarvis…"></textarea>
+                <textarea .value=${this._chatInput} @input=${e=>this._chatInput=e.target.value}
+                  @keydown=${this._onChatKey} ?disabled=${this._sending} placeholder="Ask Jarvis…"></textarea>
                 <button class="send-btn" ?disabled=${this._sending} @click=${this._sendChat}>▶</button>
               </div>
             </div>
