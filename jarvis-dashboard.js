@@ -2,13 +2,39 @@
 const LIT  = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 const THR  = 'https://esm.sh/three@0.160.0';
 const OC   = 'https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls';
-const STLL = 'https://esm.sh/three@0.160.0/examples/jsm/loaders/STLLoader';
 
-const [litM, thrM, ocM, stlM] = await Promise.all([import(LIT), import(THR), import(OC), import(STLL)]);
+
+const [litM, thrM, ocM] = await Promise.all([import(LIT), import(THR), import(OC)]);
 const { LitElement, html, css, nothing } = litM;
 const THR  = 'https://esm.sh/three@0.160.0';
 const { OrbitControls } = ocM;
-const { STLLoader } = stlM;
+
+
+
+function parseSTL(buffer) {
+  const dv = new DataView(buffer);
+  const numTri = dv.getUint32(80, true);
+  if (buffer.byteLength !== 84 + numTri * 50) return null; // ASCII STL unsupported
+  const pos = new Float32Array(numTri * 9);
+  const nrm = new Float32Array(numTri * 9);
+  let off = 84, pi = 0, ni = 0;
+  for (let i = 0; i < numTri; i++) {
+    const nx = dv.getFloat32(off, true), ny = dv.getFloat32(off+4, true), nz = dv.getFloat32(off+8, true);
+    off += 12;
+    for (let v = 0; v < 3; v++) {
+      pos[pi++] = dv.getFloat32(off, true);
+      pos[pi++] = dv.getFloat32(off+4, true);
+      pos[pi++] = dv.getFloat32(off+8, true);
+      nrm[ni++] = nx; nrm[ni++] = ny; nrm[ni++] = nz;
+      off += 12;
+    }
+    off += 2;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('normal',   new THREE.BufferAttribute(nrm, 3));
+  return geo;
+}
 
 class JarvisDashboard extends LitElement {
 
@@ -285,8 +311,8 @@ class JarvisDashboard extends LitElement {
       if (!r.ok) return;
       const buffer = await r.arrayBuffer();
 
-      const loader = new STLLoader();
-      const geo    = loader.parse(buffer);
+      const geo = parseSTL(buffer);
+      if (!geo) return;
       geo.computeBoundingBox();
 
       const center = new THREE.Vector3();
