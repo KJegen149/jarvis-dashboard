@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.2
+// Jarvis Hub Dashboard v0.3
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 const { LitElement, html, css, nothing } = await import(LIT);
 
@@ -13,6 +13,10 @@ class JarvisDashboard extends LitElement {
     _activeView:    { state: true },
     _activeProject: { state: true },
     _chatInput:     { state: true },
+    _projects:      { state: true },
+    _messages:      { state: true },
+    _log:           { state: true },
+    _sending:       { state: true },
   };
 
   constructor() {
@@ -23,13 +27,110 @@ class JarvisDashboard extends LitElement {
     this._activeView    = 'workspace';
     this._activeProject = null;
     this._chatInput     = '';
+    this._projects      = [];
+    this._messages      = [];
+    this._log           = [];
+    this._sending       = false;
   }
 
-  setConfig(config) { this._config = config; }
+  setConfig(config) {
+    this._config = config;
+    if (config.api_url && config.api_key) this._loadData();
+  }
   static getStubConfig() { return { api_url: '', api_key: '' }; }
 
+  get _apiUrl()     { return (this._config?.api_url ?? '').replace(/\/$/, ''); }
+  get _apiHeaders() { return { 'Content-Type': 'application/json', 'X-API-Key': this._config?.api_key ?? '' }; }
+
+  async _loadData() {
+    await Promise.all([this._loadProjects(), this._loadLog()]);
+  }
+
+  async _loadProjects() {
+    try {
+      const r = await fetch(`${this._apiUrl}/api/projects`, { headers: this._apiHeaders });
+      if (r.ok) this._projects = await r.json();
+    } catch (_) {}
+  }
+
+  async _loadLog() {
+    try {
+      const r = await fetch(`${this._apiUrl}/api/log`, { headers: this._apiHeaders });
+      if (r.ok) {
+        const raw = await r.json();
+        this._log = raw.map(m => ({
+          type: m.role === 'user' ? 'cmd' : 'resp',
+          time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          text: m.content,
+          project: m.project_name,
+        })).reverse();
+      }
+    } catch (_) {}
+  }
+
+  async _loadMessages(projectId) {
+    try {
+      const r = await fetch(`${this._apiUrl}/api/projects/${projectId}/messages`, { headers: this._apiHeaders });
+      if (r.ok) this._messages = await r.json();
+    } catch (_) {}
+  }
+
+  async _selectProject(p) {
+    this._activeProject = p;
+    this._activeView = p.type === '3d_model' ? '3d' : p.type === 'svg' ? 'svg' : 'workspace';
+    this._messages = [];
+    await this._loadMessages(p.id);
+  }
+
+  async _sendChat() {
+    const msg = this._chatInput.trim();
+    if (!msg || this._sending) return;
+    this._chatInput = '';
+    this._sending = true;
+
+    // Optimistic user bubble
+    this._messages = [...this._messages, { id: '_u', role: 'user', content: msg }];
+
+    try {
+      const r = await fetch(`${this._apiUrl}/api/chat`, {
+        method: 'POST',
+        headers: this._apiHeaders,
+        body: JSON.stringify({ message: msg, project_id: this._activeProject?.id ?? null }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        this._messages = [...this._messages, { id: '_j', role: 'jarvis', content: d.response }];
+        this._loadLog(); // refresh log in background
+      } else {
+        this._messages = [...this._messages, { id: '_e', role: 'jarvis', content: 'Something went wrong. Try again.' }];
+      }
+    } catch (_) {
+      this._messages = [...this._messages, { id: '_e', role: 'jarvis', content: "Can't reach the API right now." }];
+    }
+    this._sending = false;
+  }
+
+  async _newProject() {
+    const name = prompt('Project name:');
+    if (!name?.trim()) return;
+    const typeInput = prompt('Type (3d_model / svg / note / other):', 'other');
+    const type = ['3d_model','svg','note','other'].includes(typeInput) ? typeInput : 'other';
+    try {
+      const r = await fetch(`${this._apiUrl}/api/projects`, {
+        method: 'POST',
+        headers: this._apiHeaders,
+        body: JSON.stringify({ name: name.trim(), type }),
+      });
+      if (r.ok) {
+        const p = await r.json();
+        this._projects = [p, ...this._projects];
+        this._selectProject(p);
+      }
+    } catch (_) {}
+  }
+
   _onChatKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
   }
 
   static styles = css`
@@ -62,7 +163,6 @@ class JarvisDashboard extends LitElement {
       border: 1px solid var(--border);
     }
 
-    /* ── Status bar ── */
     .statusbar {
       display: flex;
       align-items: center;
@@ -109,7 +209,6 @@ class JarvisDashboard extends LitElement {
     }
     .toggle-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-    /* ── Main ── */
     .main {
       display: flex;
       flex: 1;
@@ -117,7 +216,6 @@ class JarvisDashboard extends LitElement {
       min-height: 0;
     }
 
-    /* ── Panels ── */
     .panel {
       width: var(--panel-w);
       background: var(--surface);
@@ -162,7 +260,6 @@ class JarvisDashboard extends LitElement {
       min-height: 0;
     }
 
-    /* ── Chat ── */
     .chat-msgs {
       flex: 1;
       overflow-y: auto;
@@ -190,6 +287,7 @@ class JarvisDashboard extends LitElement {
     }
     .msg.user   { background:#0d2d40; border:1px solid #1a4a60; color:#8ecfef; }
     .msg.jarvis { background:#0a2010; border:1px solid #1a4020; color:#80d080; }
+    .msg.sending { opacity: .5; }
 
     .chat-footer {
       padding: 7px;
@@ -220,10 +318,11 @@ class JarvisDashboard extends LitElement {
       font-size: 1rem;
       font-weight: 700;
       padding: 0 10px;
+      transition: opacity .15s;
     }
-    .send-btn:hover { opacity: .8; }
+    .send-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .send-btn:hover:not(:disabled) { opacity: .8; }
 
-    /* ── Workspace ── */
     .workspace {
       flex: 1;
       display: flex;
@@ -313,7 +412,6 @@ class JarvisDashboard extends LitElement {
       margin-top: 6px;
     }
 
-    /* ── Gallery ── */
     .gallery-list {
       flex: 1;
       overflow-y: auto;
@@ -337,6 +435,7 @@ class JarvisDashboard extends LitElement {
     .proj-card.active { border-color: var(--accent); background: rgba(0,245,255,.05); }
     .proj-card .pc-name { font-size: .82rem; font-weight: 500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .proj-card .pc-meta { font-size: .68rem; color: var(--text-dim); margin-top: 2px; }
+    .gallery-empty { font-size: .78rem; color: var(--text-dim); text-align: center; padding: 20px 10px; }
     .gallery-foot {
       padding: 7px;
       border-top: 1px solid var(--border);
@@ -355,7 +454,6 @@ class JarvisDashboard extends LitElement {
     }
     .new-btn:hover { background: rgba(0,245,255,.15); }
 
-    /* ── Action bar ── */
     .actionbar {
       display: flex;
       gap: 6px;
@@ -378,7 +476,6 @@ class JarvisDashboard extends LitElement {
     .act:hover    { border-color: var(--accent); color: var(--accent); }
     .act:disabled { opacity: .3; cursor: not-allowed; }
 
-    /* ── Log drawer ── */
     .logdrawer {
       background: var(--surface);
       border-top: 1px solid var(--border);
@@ -448,9 +545,9 @@ class JarvisDashboard extends LitElement {
     .log-entry.cmd  .le-type { background: rgba(0,245,255,.12); color: var(--accent); }
     .log-entry.resp .le-type { background: rgba(80,200,80,.12);  color: #80d080; }
     .log-entry.sys  .le-type { background: rgba(255,170,0,.12);  color: #ffaa00; }
+    .le-proj { color: var(--text-dim); font-size: .65rem; flex-shrink: 0; }
     .le-text { color: var(--text); flex: 1; }
 
-    /* ── Responsive ── */
     @media (max-width: 680px) {
       .root { height: auto; min-height: 400px; }
       .main { flex-direction: column; }
@@ -464,15 +561,6 @@ class JarvisDashboard extends LitElement {
   get _demoMessages() {
     return [
       { id: '1', role: 'jarvis', content: 'Jarvis online. How can I help?' },
-      { id: '2', role: 'user',   content: 'Turn on the living room lights.' },
-      { id: '3', role: 'jarvis', content: 'Done.' },
-    ];
-  }
-
-  get _demoProjects() {
-    return [
-      { id: 'a', name: 'Desk Organiser', type: '3d_model', updated_at: new Date().toISOString() },
-      { id: 'b', name: 'Label Sheet',    type: 'svg',      updated_at: new Date().toISOString() },
     ];
   }
 
@@ -480,17 +568,13 @@ class JarvisDashboard extends LitElement {
     const now = new Date();
     const t = d => new Date(now - d * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     return [
-      { type: 'sys',  time: t(120), text: 'Jarvis online — all systems nominal' },
-      { type: 'cmd',  time: t(90),  text: 'Turn on the living room lights' },
-      { type: 'resp', time: t(89),  text: 'Done.' },
-      { type: 'cmd',  time: t(45),  text: "What's the weather like?" },
-      { type: 'resp', time: t(44),  text: "It's currently 68°F and partly cloudy." },
+      { type: 'sys', time: t(5), text: 'Connected to Jarvis API' },
     ];
   }
 
   _renderMsg(m) {
     return html`
-      <div class="msg ${m.role}">
+      <div class="msg ${m.role} ${m.id === '_sending' ? 'sending' : ''}">
         <div class="msg-role">${m.role === 'jarvis' ? '⬡ Jarvis' : '▶ You'}</div>
         ${m.content}
       </div>`;
@@ -500,10 +584,7 @@ class JarvisDashboard extends LitElement {
     const labels = { '3d_model':'3D', svg:'SVG', note:'Note', other:'—' };
     return html`
       <div class="proj-card ${this._activeProject?.id === p.id ? 'active' : ''}"
-           @click=${() => {
-             this._activeProject = p;
-             this._activeView = p.type === '3d_model' ? '3d' : p.type === 'svg' ? 'svg' : 'workspace';
-           }}>
+           @click=${() => this._selectProject(p)}>
         <div class="pc-name">${p.name}</div>
         <div class="pc-meta">${labels[p.type] ?? p.type}</div>
       </div>`;
@@ -514,6 +595,7 @@ class JarvisDashboard extends LitElement {
       <div class="log-entry ${e.type}">
         <span class="le-time">${e.time}</span>
         <span class="le-type">${e.type === 'cmd' ? 'CMD' : e.type === 'resp' ? 'RESP' : 'SYS'}</span>
+        ${e.project ? html`<span class="le-proj">[${e.project}]</span>` : nothing}
         <span class="le-text">${e.text}</span>
       </div>`;
   }
@@ -538,8 +620,11 @@ class JarvisDashboard extends LitElement {
   }
 
   render() {
-    const haProj = !!this._activeProject;
-    const lastLog = this._demoLog.at(-1);
+    const haProj   = !!this._activeProject;
+    const messages = this._messages.length ? this._messages : this._demoMessages;
+    const projects = this._projects;
+    const log      = this._log.length ? this._log : this._demoLog;
+    const lastLog  = log.at(-1);
 
     return html`
       <div class="root">
@@ -568,15 +653,21 @@ class JarvisDashboard extends LitElement {
             </div>
             <div class="panel-body">
               <div class="chat-msgs">
-                ${this._demoMessages.map(m=>this._renderMsg(m))}
+                ${messages.map(m=>this._renderMsg(m))}
+                ${this._sending ? html`
+                  <div class="msg jarvis sending">
+                    <div class="msg-role">⬡ Jarvis</div>
+                    …
+                  </div>` : nothing}
               </div>
               <div class="chat-footer">
                 <textarea
                   .value=${this._chatInput}
                   @input=${e=>this._chatInput=e.target.value}
                   @keydown=${this._onChatKey}
+                  ?disabled=${this._sending}
                   placeholder="Ask Jarvis…"></textarea>
-                <button class="send-btn">▶</button>
+                <button class="send-btn" ?disabled=${this._sending} @click=${this._sendChat}>▶</button>
               </div>
             </div>
           </div>
@@ -595,10 +686,12 @@ class JarvisDashboard extends LitElement {
             </div>
             <div class="panel-body">
               <div class="gallery-list">
-                ${this._demoProjects.map(p=>this._renderProjCard(p))}
+                ${projects.length
+                  ? projects.map(p=>this._renderProjCard(p))
+                  : html`<div class="gallery-empty">No projects yet.<br>Create one below.</div>`}
               </div>
               <div class="gallery-foot">
-                <button class="new-btn">+ New Project</button>
+                <button class="new-btn" @click=${this._newProject}>+ New Project</button>
               </div>
             </div>
           </div>
@@ -610,7 +703,7 @@ class JarvisDashboard extends LitElement {
           <button class="act" ?disabled=${!haProj}>✂ Cut</button>
           <button class="act" ?disabled=${!haProj}>⬇ Export</button>
           <button class="act" ?disabled=${!haProj}>📁 Upload</button>
-          <button class="act">↻ Refresh</button>
+          <button class="act" @click=${this._loadData}>↻ Refresh</button>
         </div>
 
         <div class="logdrawer ${this._logOpen?'':'collapsed'}">
@@ -620,7 +713,7 @@ class JarvisDashboard extends LitElement {
             <span class="lh-chevron">▼</span>
           </div>
           <div class="log-body">
-            ${this._demoLog.map(e=>this._renderLogEntry(e))}
+            ${log.map(e=>this._renderLogEntry(e))}
           </div>
         </div>
 
