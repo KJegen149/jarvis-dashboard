@@ -45,6 +45,7 @@ class JarvisDashboard extends LitElement {
       --text-dim:   #4a5a70;
       --radius:     10px;
       --panel-w:    220px;
+      height: 100%;
       font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
       color: var(--text);
     }
@@ -53,7 +54,7 @@ class JarvisDashboard extends LitElement {
     .root {
       display: flex;
       flex-direction: column;
-      height: calc(100vh - 57px);
+      height: 100%;
       min-height: 500px;
       background: var(--bg);
       border-radius: var(--radius);
