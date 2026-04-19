@@ -1,13 +1,11 @@
 // Jarvis Hub Dashboard v0.4
 const LIT  = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 const THR  = 'https://esm.sh/three@0.160.0';
-const OC   = 'https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls';
 
 
-const [litM, thrM, ocM] = await Promise.all([import(LIT), import(THR), import(OC)]);
+const [litM, thrM] = await Promise.all([import(LIT), import(THR)]);
 const { LitElement, html, css, nothing } = litM;
 const THR  = 'https://esm.sh/three@0.160.0';
-const { OrbitControls } = ocM;
 
 
 
@@ -233,7 +231,36 @@ class JarvisDashboard extends LitElement {
 
   // ── Three.js ─────────────────────────────────────────────────────────────
 
-  _initThree() {
+  _makeOrbit(canvas, camera, initRadius) {
+    let down = false, lastX = 0, lastY = 0;
+    let theta = 0, phi = Math.PI / 2.5, radius = initRadius;
+    const update = () => {
+      camera.position.set(
+        radius * Math.sin(phi) * Math.sin(theta),
+        radius * Math.cos(phi),
+        radius * Math.sin(phi) * Math.cos(theta)
+      );
+      camera.lookAt(0, 0, 0);
+    };
+    canvas.addEventListener('mousedown',  e => { down = true; lastX = e.clientX; lastY = e.clientY; });
+    canvas.addEventListener('mousemove',  e => {
+      if (!down) return;
+      theta -= (e.clientX - lastX) * 0.008;
+      phi    = Math.max(0.1, Math.min(Math.PI - 0.1, phi - (e.clientY - lastY) * 0.008));
+      lastX  = e.clientX; lastY = e.clientY;
+      update();
+    });
+    canvas.addEventListener('mouseup',    () => down = false);
+    canvas.addEventListener('mouseleave', () => down = false);
+    canvas.addEventListener('wheel', e => {
+      radius = Math.max(1, Math.min(20, radius + e.deltaY * 0.02));
+      update(); e.preventDefault();
+    }, { passive: false });
+    update();
+    return { reset: () => { theta = 0; phi = Math.PI / 2.5; radius = initRadius; update(); } };
+  }
+
+    _initThree() {
     if (this._three) return;
     const canvas = this.shadowRoot?.querySelector('#three-canvas');
     if (!canvas) return;
@@ -266,11 +293,7 @@ class JarvisDashboard extends LitElement {
     const demoWire = new THREE.Mesh(geo.clone(), wireMat);
     scene.add(demoMesh, demoWire);
 
-    const controls = new OrbitControls(camera, canvas);
-    controls.enableDamping  = true;
-    controls.dampingFactor  = 0.05;
-    controls.minDistance    = 1;
-    controls.maxDistance    = 20;
+    const controls = this._makeOrbit(canvas, camera, 6);
 
     const ro = new ResizeObserver(entries => {
       const { width, height } = entries[0].contentRect;
@@ -285,7 +308,6 @@ class JarvisDashboard extends LitElement {
     const animate = () => {
       animFrame = requestAnimationFrame(animate);
       if (demoMesh.parent) { demoMesh.rotation.y += 0.004; demoWire.rotation.y += 0.004; }
-      controls.update();
       renderer.render(scene, camera);
     };
     animate();
@@ -297,7 +319,6 @@ class JarvisDashboard extends LitElement {
     if (!this._three) return;
     cancelAnimationFrame(this._three.animFrame);
     this._three.ro.disconnect();
-    this._three.controls.dispose();
     this._three.renderer.dispose();
     this._three = null;
   }
@@ -332,7 +353,6 @@ class JarvisDashboard extends LitElement {
       scene.add(mesh, wireMesh);
 
       this._three.camera.position.set(0, 0, 6);
-      this._three.controls.reset();
     } catch (_) {}
   }
 
