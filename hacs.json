@@ -1,0 +1,7 @@
+{
+  "name": "Jarvis Dashboard",
+  "description": "Jarvis Hub — AI assistant, project gallery, and HoloMat workspace",
+  "render_readme": true,
+  "filename": "jarvis-dashboard.js",
+  "content_in_root": true
+}
