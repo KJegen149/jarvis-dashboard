@@ -141,12 +141,19 @@ class JarvisDashboard extends LitElement {
       const r = await fetch(`${this._apiUrl}/api/chat`, {
         method: 'POST',
         headers: this._apiHeaders,
-        body: JSON.stringify({ message: msg, project_id: this._activeProject?.id ?? null }),
+        body: JSON.stringify({
+          message: msg,
+          project_id: this._activeProject?.id ?? null,
+          history: this._messages.slice(-10).filter(m=>m.id!=='_sending').map(m=>({role:m.role,content:m.content})),
+        }),
       });
       if (r.ok) {
         const d = await r.json();
         this._messages = [...this._messages, { id: '_j', role: 'jarvis', content: d.response }];
         this._loadLog();
+        await this.updateComplete;
+        const cm = this.shadowRoot?.querySelector('.chat-msgs');
+        if (cm) cm.scrollTop = cm.scrollHeight;
       } else {
         this._messages = [...this._messages, { id: '_e', role: 'jarvis', content: 'Something went wrong.' }];
       }
@@ -335,7 +342,8 @@ class JarvisDashboard extends LitElement {
       --text-dim:   #4a5a70;
       --radius:     10px;
       --panel-w:    220px;
-      height: 100%;
+      height: calc(100vh - var(--header-height, 56px));
+      overflow: hidden;
       font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
       color: var(--text);
     }
