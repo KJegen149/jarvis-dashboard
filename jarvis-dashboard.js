@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.1 — UI shell (no API yet)
+// Jarvis Hub Dashboard v0.2
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 const { LitElement, html, css, nothing } = await import(LIT);
 
@@ -9,39 +9,27 @@ class JarvisDashboard extends LitElement {
     _config:        { state: true },
     _leftOpen:      { state: true },
     _rightOpen:     { state: true },
+    _logOpen:       { state: true },
     _activeView:    { state: true },
     _activeProject: { state: true },
     _chatInput:     { state: true },
-    _logOpen:       { state: true },
   };
 
   constructor() {
     super();
     this._leftOpen      = true;
     this._rightOpen     = true;
+    this._logOpen       = true;
     this._activeView    = 'workspace';
     this._activeProject = null;
     this._chatInput     = '';
-    this._logOpen       = true;
   }
 
-  setConfig(config) {
-    this._config = config;
-  }
-
-  static getConfigElement() {
-    return document.createElement('jarvis-dashboard-editor');
-  }
-
-  static getStubConfig() {
-    return { api_url: '', api_key: '' };
-  }
+  setConfig(config) { this._config = config; }
+  static getStubConfig() { return { api_url: '', api_key: '' }; }
 
   _onChatKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      // Chat send will be wired in next step
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); }
   }
 
   static styles = css`
@@ -62,7 +50,6 @@ class JarvisDashboard extends LitElement {
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
-    /* ── Root ── */
     .root {
       display: flex;
       flex-direction: column;
@@ -126,6 +113,7 @@ class JarvisDashboard extends LitElement {
       display: flex;
       flex: 1;
       overflow: hidden;
+      min-height: 0;
     }
 
     /* ── Panels ── */
@@ -170,6 +158,7 @@ class JarvisDashboard extends LitElement {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      min-height: 0;
     }
 
     /* ── Chat ── */
@@ -180,6 +169,7 @@ class JarvisDashboard extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 7px;
+      min-height: 0;
     }
     .chat-msgs::-webkit-scrollbar { width: 3px; }
     .chat-msgs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -197,7 +187,7 @@ class JarvisDashboard extends LitElement {
       margin-bottom: 2px;
       opacity: .6;
     }
-    .msg.user   { background:#0d2d40; border:1px solid #1a4a60; color:#8ecfef; align-self:flex-end; }
+    .msg.user   { background:#0d2d40; border:1px solid #1a4a60; color:#8ecfef; }
     .msg.jarvis { background:#0a2010; border:1px solid #1a4020; color:#80d080; }
 
     .chat-footer {
@@ -229,7 +219,6 @@ class JarvisDashboard extends LitElement {
       font-size: 1rem;
       font-weight: 700;
       padding: 0 10px;
-      transition: opacity .2s;
     }
     .send-btn:hover { opacity: .8; }
 
@@ -241,6 +230,7 @@ class JarvisDashboard extends LitElement {
       justify-content: center;
       padding: 14px;
       overflow: hidden;
+      min-height: 0;
     }
     .ws-surface {
       width: 100%;
@@ -301,19 +291,14 @@ class JarvisDashboard extends LitElement {
     }
     .vt.on { background: var(--accent); color: #000; font-weight: 700; }
 
-    .ws-project-info {
-      text-align: center;
-    }
+    .ws-project-info { text-align: center; }
     .ws-project-info h2 {
       font-size: 1.2rem;
       font-weight: 600;
       color: var(--text);
       margin-bottom: 6px;
     }
-    .ws-project-info p {
-      font-size: .82rem;
-      color: var(--text-dim);
-    }
+    .ws-project-info p { font-size: .82rem; color: var(--text-dim); }
     .badge {
       display: inline-block;
       background: var(--accent-dim);
@@ -335,10 +320,10 @@ class JarvisDashboard extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 5px;
+      min-height: 0;
     }
     .gallery-list::-webkit-scrollbar { width: 3px; }
     .gallery-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
     .proj-card {
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -351,7 +336,6 @@ class JarvisDashboard extends LitElement {
     .proj-card.active { border-color: var(--accent); background: rgba(0,245,255,.05); }
     .proj-card .pc-name { font-size: .82rem; font-weight: 500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .proj-card .pc-meta { font-size: .68rem; color: var(--text-dim); margin-top: 2px; }
-
     .gallery-foot {
       padding: 7px;
       border-top: 1px solid var(--border);
@@ -367,7 +351,6 @@ class JarvisDashboard extends LitElement {
       font-size: .78rem;
       font-weight: 600;
       padding: 6px;
-      transition: background .15s;
     }
     .new-btn:hover { background: rgba(0,245,255,.15); }
 
@@ -412,58 +395,59 @@ class JarvisDashboard extends LitElement {
       gap: 8px;
       padding: 6px 14px;
       cursor: pointer;
-      border-bottom: 1px solid var(--border);
       flex-shrink: 0;
       user-select: none;
+      min-height: 32px;
     }
     .log-head:hover { background: var(--surface2); }
-    .log-head .lh-title {
+    .lh-title {
       font-size: .7rem;
       font-weight: 700;
       letter-spacing: 1.5px;
       text-transform: uppercase;
       color: var(--accent);
-      flex: 1;
+      flex-shrink: 0;
     }
-    .log-head .lh-last {
+    .lh-last {
+      flex: 1;
       font-size: .72rem;
       color: var(--text-dim);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 60%;
     }
-    .log-head .lh-chevron {
+    .lh-chevron {
       color: var(--text-dim);
-      font-size: .8rem;
+      font-size: .75rem;
       transition: transform .25s;
+      flex-shrink: 0;
     }
     .logdrawer:not(.collapsed) .lh-chevron { transform: rotate(180deg); }
     .log-body {
       flex: 1;
       overflow-y: auto;
-      padding: 8px 14px;
+      padding: 6px 14px 10px;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 3px;
     }
     .log-body::-webkit-scrollbar { width: 3px; }
     .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     .log-entry {
       display: flex;
-      gap: 10px;
+      gap: 8px;
       align-items: baseline;
-      font-size: .75rem;
+      font-size: .74rem;
       line-height: 1.4;
-      padding: 2px 0;
+      padding: 3px 0;
       border-bottom: 1px solid rgba(255,255,255,.03);
     }
-    .log-entry .le-time { color: var(--text-dim); flex-shrink: 0; font-size: .68rem; font-family: monospace; }
-    .log-entry .le-type { flex-shrink: 0; font-size: .65rem; font-weight: 700; letter-spacing: .5px; padding: 1px 5px; border-radius: 3px; }
-    .log-entry.cmd  .le-type { background: rgba(0,245,255,.1);  color: var(--accent); }
-    .log-entry.resp .le-type { background: rgba(80,200,80,.1);  color: #80d080; }
-    .log-entry.sys  .le-type { background: rgba(255,170,0,.1);  color: #ffaa00; }
-    .log-entry .le-text { color: var(--text); flex: 1; }
+    .le-time  { color: var(--text-dim); flex-shrink: 0; font-family: monospace; font-size: .68rem; }
+    .le-type  { flex-shrink: 0; font-size: .63rem; font-weight: 700; letter-spacing: .5px; padding: 1px 5px; border-radius: 3px; }
+    .log-entry.cmd  .le-type { background: rgba(0,245,255,.12); color: var(--accent); }
+    .log-entry.resp .le-type { background: rgba(80,200,80,.12);  color: #80d080; }
+    .log-entry.sys  .le-type { background: rgba(255,170,0,.12);  color: #ffaa00; }
+    .le-text { color: var(--text); flex: 1; }
 
     /* ── Responsive ── */
     @media (max-width: 680px) {
@@ -476,26 +460,11 @@ class JarvisDashboard extends LitElement {
     }
   `;
 
-  // ── Placeholder data ────────────────────────────────────────────────────
-
   get _demoMessages() {
     return [
       { id: '1', role: 'jarvis', content: 'Jarvis online. How can I help?' },
       { id: '2', role: 'user',   content: 'Turn on the living room lights.' },
       { id: '3', role: 'jarvis', content: 'Done.' },
-    ];
-  }
-
-  get _demoLog() {
-    const now = new Date();
-    const t = (offset) => new Date(now - offset * 1000)
-      .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    return [
-      { type: 'sys',  time: t(120), text: 'Jarvis online — all systems nominal' },
-      { type: 'cmd',  time: t(90),  text: 'Turn on the living room lights' },
-      { type: 'resp', time: t(89),  text: 'Done.' },
-      { type: 'cmd',  time: t(45),  text: 'What\'s the weather like?' },
-      { type: 'resp', time: t(44),  text: 'It\'s currently 68°F and partly cloudy.' },
     ];
   }
 
@@ -506,22 +475,47 @@ class JarvisDashboard extends LitElement {
     ];
   }
 
-  // ── Render helpers ──────────────────────────────────────────────────────
+  get _demoLog() {
+    const now = new Date();
+    const t = d => new Date(now - d * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return [
+      { type: 'sys',  time: t(120), text: 'Jarvis online — all systems nominal' },
+      { type: 'cmd',  time: t(90),  text: 'Turn on the living room lights' },
+      { type: 'resp', time: t(89),  text: 'Done.' },
+      { type: 'cmd',  time: t(45),  text: "What's the weather like?" },
+      { type: 'resp', time: t(44),  text: "It's currently 68°F and partly cloudy." },
+    ];
+  }
 
-  _renderMsg(m) { return html`
-    <div class="msg ${m.role}">
-      <div class="msg-role">${m.role === 'jarvis' ? '⬡ Jarvis' : '▶ You'}</div>
-      ${m.content}
-    </div>`; }
+  _renderMsg(m) {
+    return html`
+      <div class="msg ${m.role}">
+        <div class="msg-role">${m.role === 'jarvis' ? '⬡ Jarvis' : '▶ You'}</div>
+        ${m.content}
+      </div>`;
+  }
 
   _renderProjCard(p) {
     const labels = { '3d_model':'3D', svg:'SVG', note:'Note', other:'—' };
     return html`
       <div class="proj-card ${this._activeProject?.id === p.id ? 'active' : ''}"
-           @click=${() => { this._activeProject = p; this._activeView = p.type === '3d_model' ? '3d' : p.type === 'svg' ? 'svg' : 'workspace'; }}>
+           @click=${() => {
+             this._activeProject = p;
+             this._activeView = p.type === '3d_model' ? '3d' : p.type === 'svg' ? 'svg' : 'workspace';
+           }}>
         <div class="pc-name">${p.name}</div>
         <div class="pc-meta">${labels[p.type] ?? p.type}</div>
-      </div>`; }
+      </div>`;
+  }
+
+  _renderLogEntry(e) {
+    return html`
+      <div class="log-entry ${e.type}">
+        <span class="le-time">${e.time}</span>
+        <span class="le-type">${e.type === 'cmd' ? 'CMD' : e.type === 'resp' ? 'RESP' : 'SYS'}</span>
+        <span class="le-text">${e.text}</span>
+      </div>`;
+  }
 
   _renderWorkspaceSurface() {
     if (!this._activeProject) return html`
@@ -529,7 +523,6 @@ class JarvisDashboard extends LitElement {
         <div class="watermark">Jarvis</div>
         <p>Select or create a project</p>
       </div>`;
-
     return html`
       <div class="view-tabs">
         <button class="vt ${this._activeView==='workspace'?'on':''}" @click=${()=>this._activeView='workspace'}>Info</button>
@@ -543,17 +536,13 @@ class JarvisDashboard extends LitElement {
       </div>`;
   }
 
-  // ── Main render ─────────────────────────────────────────────────────────
-
   render() {
-    const msgs     = this._demoMessages;
-    const projects = this._demoProjects;
-    const haProj   = !!this._activeProject;
+    const haProj = !!this._activeProject;
+    const lastLog = this._demoLog.at(-1);
 
     return html`
       <div class="root">
 
-        <!-- Status bar -->
         <div class="statusbar">
           <span class="logo">Jarvis</span>
           <div class="pulse"></div>
@@ -568,10 +557,8 @@ class JarvisDashboard extends LitElement {
           </button>
         </div>
 
-        <!-- Main row -->
         <div class="main">
 
-          <!-- Left: Chat -->
           <div class="panel panel-left ${this._leftOpen?'':'closed'}">
             <div class="panel-head">
               <span class="ph-label">Chat</span>
@@ -580,7 +567,7 @@ class JarvisDashboard extends LitElement {
             </div>
             <div class="panel-body">
               <div class="chat-msgs">
-                ${msgs.map(m=>this._renderMsg(m))}
+                ${this._demoMessages.map(m=>this._renderMsg(m))}
               </div>
               <div class="chat-footer">
                 <textarea
@@ -593,14 +580,12 @@ class JarvisDashboard extends LitElement {
             </div>
           </div>
 
-          <!-- Center: Workspace -->
           <div class="workspace">
             <div class="ws-surface">
               ${this._renderWorkspaceSurface()}
             </div>
           </div>
 
-          <!-- Right: Projects -->
           <div class="panel panel-right ${this._rightOpen?'':'closed'}">
             <div class="panel-head">
               <span class="ph-icon">📁</span>
@@ -609,7 +594,7 @@ class JarvisDashboard extends LitElement {
             </div>
             <div class="panel-body">
               <div class="gallery-list">
-                ${projects.map(p=>this._renderProjCard(p))}
+                ${this._demoProjects.map(p=>this._renderProjCard(p))}
               </div>
               <div class="gallery-foot">
                 <button class="new-btn">+ New Project</button>
@@ -619,7 +604,6 @@ class JarvisDashboard extends LitElement {
 
         </div>
 
-        <!-- Action bar -->
         <div class="actionbar">
           <button class="act" ?disabled=${!haProj}>🖨 Print</button>
           <button class="act" ?disabled=${!haProj}>✂ Cut</button>
@@ -628,15 +612,14 @@ class JarvisDashboard extends LitElement {
           <button class="act">↻ Refresh</button>
         </div>
 
-        <!-- Log drawer -->
-        <div class="logdrawer ${this._logOpen ? '' : 'collapsed'}">
-          <div class="log-head" @click=${() => this._logOpen = !this._logOpen}>
+        <div class="logdrawer ${this._logOpen?'':'collapsed'}">
+          <div class="log-head" @click=${()=>this._logOpen=!this._logOpen}>
             <span class="lh-title">⬡ Activity Log</span>
-            <span class="lh-last">${this._demoLog.at(-1)?.text ?? ''}</span>
+            <span class="lh-last">${lastLog?.text ?? ''}</span>
             <span class="lh-chevron">▼</span>
           </div>
           <div class="log-body">
-            ${this._demoLog.map(e => this._renderLogEntry(e))}
+            ${this._demoLog.map(e=>this._renderLogEntry(e))}
           </div>
         </div>
 
