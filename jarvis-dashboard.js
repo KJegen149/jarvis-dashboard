@@ -1,12 +1,12 @@
 // Jarvis Hub Dashboard v0.4
 const LIT  = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
-const THR  = 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
-const OC   = 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
-const STLL = 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/STLLoader.js';
+const THR  = 'https://esm.sh/three@0.160.0';
+const OC   = 'https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls';
+const STLL = 'https://esm.sh/three@0.160.0/examples/jsm/loaders/STLLoader';
 
 const [litM, thrM, ocM, stlM] = await Promise.all([import(LIT), import(THR), import(OC), import(STLL)]);
 const { LitElement, html, css, nothing } = litM;
-const THREE = thrM;
+const THR  = 'https://esm.sh/three@0.160.0';
 const { OrbitControls } = ocM;
 const { STLLoader } = stlM;
 
