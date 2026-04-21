@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.23
+// Jarvis Hub Dashboard v0.24
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -289,6 +289,14 @@ class JarvisDashboard extends LitElement {
           ];
         }
         if (d.search_results?.length) this._startSearchSession(d.search_results, d.search_query ?? '');
+        // Auto-trigger Meshy if Jarvis responded with a meshy block
+        const meshyMatch = d.response?.match(/```meshy[ \t]*\n?([\s\S]*?)```/i);
+        if (meshyMatch && this._activeProject) {
+          const prompt = meshyMatch[1].trim();
+          this._meshyPrompt = prompt;
+          this._meshyModal  = true;
+          this._startMeshyGenerate();
+        }
         this._loadLog();
       }
     } catch (_) {}
@@ -493,11 +501,16 @@ class JarvisDashboard extends LitElement {
   async _startMeshyGenerate() {
     const prompt = this._meshyPrompt.trim();
     if (!prompt) return;
+    // Clear any previous poll timer before starting a new job
+    if (this._meshyPollTimer) { clearInterval(this._meshyPollTimer); this._meshyPollTimer = null; }
     this._meshyStatus   = 'pending';
     this._meshyError    = null;
     this._meshyProgress = 0;
+    this._meshyTask     = null;
+    const url = `${this._apiUrl}/api/meshy/generate`;
+    console.log('[Jarvis] Meshy generate → POST', url, '| prompt:', prompt.slice(0, 80));
     try {
-      const r = await fetch(`${this._apiUrl}/api/meshy/generate`, {
+      const r = await fetch(url, {
         method: 'POST', headers: this._apiHeaders,
         body: JSON.stringify({ prompt }),
       });
@@ -508,6 +521,7 @@ class JarvisDashboard extends LitElement {
       this._addLog('meshy', `Meshy generating: "${prompt}"`);
       this._meshyPollTimer = setInterval(() => this._pollMeshyTask(), 4000);
     } catch (e) {
+      console.error('[Jarvis] Meshy generate error:', e);
       this._meshyStatus = 'error';
       this._meshyError  = e.message;
       this._addLog('error', `Meshy start failed: ${e.message}`);
@@ -740,14 +754,20 @@ class JarvisDashboard extends LitElement {
 
   _parseContent(text) {
     const parts = [];
-    const re = /```(openscad|scad)[ \t]*\n?([\s\S]*?)```/gi;
+    // [^\n]* allows anything after language tag (comments, extra text) before newline
+    // \n? makes the newline optional (handles no-newline edge case)
+    const re = /```(openscad|scad|meshy)[^\n]*\n?([\s\S]*?)```/gi;
     let last = 0, m;
     while ((m = re.exec(text)) !== null) {
       if (m.index > last) parts.push({ type: 'text', text: text.slice(last, m.index) });
-      parts.push({ type: 'code', lang: m[1].toLowerCase(), code: m[2].trim() });
+      const lang = m[1].toLowerCase();
+      parts.push({ type: lang === 'meshy' ? 'meshy' : 'code', lang, code: m[2].trim() });
       last = re.lastIndex;
     }
     if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
+    if (!parts.length) {
+      console.log('[Jarvis] _parseContent: no code blocks found in response preview:', text.slice(0, 120));
+    }
     return parts.length ? parts : [{ type: 'text', text }];
   }
 
@@ -1198,8 +1218,20 @@ class JarvisDashboard extends LitElement {
     return html`
       <div class="msg ${m.role} ${m.id==='_sending'?'sending':''}">
         <div class="msg-role">${isJarvis?'⬡ Jarvis':'▶ You'}</div>
-        ${parts.map(p => p.type === 'code'
-          ? html`<div class="code-block">
+        ${parts.map(p => {
+          if (p.type === 'meshy') return html`
+            <div class="code-block" style="border-color:#003a6b">
+              <div class="code-lang" style="background:#003a6b">⚡ Meshy.AI</div>
+              <div style="padding:8px 10px;font-size:12px;color:#8cf;font-style:italic">${p.code}</div>
+              ${isJarvis ? html`
+                <button class="gen-btn" style="background:#003a6b"
+                  ?disabled=${!hasProject || ['pending','generating','saving'].includes(this._meshyStatus)}
+                  @click=${() => { this._meshyPrompt=p.code; this._meshyModal=true; this._startMeshyGenerate(); }}>
+                  ${['pending','generating','saving'].includes(this._meshyStatus) ? '⏳ Generating…' : !hasProject ? '⚡ Generating — select a project first' : '⚡ Generate with Meshy'}
+                </button>` : nothing}
+            </div>`;
+          if (p.type === 'code') return html`
+            <div class="code-block">
               <div class="code-lang">OpenSCAD</div>
               <pre class="code-pre">${p.code}</pre>
               ${isJarvis ? html`
@@ -1211,9 +1243,9 @@ class JarvisDashboard extends LitElement {
                 </button>
                 ${this._genError ? html`<div class="gen-error">⚠ ${this._genError}</div>` : nothing}
               ` : nothing}
-            </div>`
-          : html`<span style="white-space:pre-wrap">${p.text}</span>`
-        )}
+            </div>`;
+          return html`<span style="white-space:pre-wrap">${p.text}</span>`;
+        })}
       </div>`;
   }
 
