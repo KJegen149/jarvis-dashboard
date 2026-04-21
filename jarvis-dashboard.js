@@ -1,4 +1,6 @@
-// Jarvis Hub Dashboard v0.5
+// Jarvis Hub Dashboard v0.23
+// Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
+// Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 const THR = 'https://esm.sh/three@0.160.0';
 
@@ -29,7 +31,7 @@ function parseSTL(buffer) {
   return geo;
 }
 
-const TYPE_LABELS = { '3d_model':'3D Model', svg:'Cricut Model', note:'Notes', other:'Other' };
+const TYPE_LABELS = { '3d_model':'3D Model', svg:'Cricut Model', note:'Notes', other:'Other', glb:'3D Model (Meshy)', '3mf':'Print File' };
 
 class JarvisDashboard extends LitElement {
 
@@ -51,13 +53,29 @@ class JarvisDashboard extends LitElement {
     _showNewProject:  { state: true },
     _newProjName:     { state: true },
     _newProjType:     { state: true },
+    _generating:      { state: true },
+    _genError:        { state: true },
+    _importing:       { state: true },
+    _searchSession:   { state: true },
+    _searchIndex:     { state: true },
+    _loadingMore:     { state: true },
+    _recording:       { state: true },
+    _transcribing:    { state: true },
+    _saving:          { state: true },
+    _printModal:      { state: true },
+    _meshyModal:      { state: true },
+    _meshyPrompt:     { state: true },
+    _meshyTask:       { state: true },
+    _meshyProgress:   { state: true },
+    _meshyStatus:     { state: true },
+    _meshyThumb:      { state: true },
+    _meshyError:      { state: true },
   };
 
   constructor() {
     super();
     this._leftOpen       = true;
     this._rightOpen      = true;
-    this._logOpen        = true;
     this._activeView     = 'workspace';
     this._activeProject  = null;
     this._chatInput      = '';
@@ -71,16 +89,37 @@ class JarvisDashboard extends LitElement {
     this._showNewProject = false;
     this._newProjName    = '';
     this._newProjType    = '3d_model';
+    this._generating     = false;
+    this._genError       = null;
+    this._importing      = null;
+    this._searchSession  = null;
+    this._searchIndex    = 0;
+    this._loadingMore    = false;
+    this._recording      = false;
+    this._transcribing   = false;
+    this._mediaRecorder  = null;
+    this._saving         = false;
+    this._printModal     = false;
+    this._meshyModal     = false;
+    this._meshyPrompt    = '';
+    this._meshyTask      = null;
+    this._meshyProgress  = 0;
+    this._meshyStatus    = 'idle';   // idle | pending | generating | saving | done | error
+    this._meshyThumb     = null;
+    this._meshyError     = null;
+    this._meshyPollTimer = null;
+    this._logOpen        = false;
   }
 
   setConfig(config) {
     this._config = config;
     if (config.api_url && config.api_key) this._loadData();
   }
-  static getStubConfig() { return { api_url: '', api_key: '' }; }
+  static getStubConfig() { return { api_url: '', api_key: '', holomat_url: '' }; }
 
   get _apiUrl()     { return (this._config?.api_url ?? '').replace(/\/$/, ''); }
   get _apiHeaders() { return { 'Content-Type': 'application/json', 'X-API-Key': this._config?.api_key ?? '' }; }
+  get _holomatUrl() { return (this._config?.holomat_url ?? '').replace(/\/$/, ''); }
 
   async _loadData() { await Promise.all([this._loadProjects(), this._loadLog()]); }
 
@@ -106,6 +145,16 @@ class JarvisDashboard extends LitElement {
     } catch (_) {}
   }
 
+  _addLog(type, text) {
+    const entry = {
+      type,
+      time: new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' }),
+      text,
+    };
+    this._log = [entry, ...this._log].slice(0, 200);
+    this._logOpen = true;
+  }
+
   async _loadMessages(projectId) {
     try {
       const r = await fetch(`${this._apiUrl}/api/projects/${projectId}/messages`, { headers: this._apiHeaders });
@@ -121,6 +170,8 @@ class JarvisDashboard extends LitElement {
   }
 
   async _selectProject(p) {
+    this._exitSearch();
+    this._printModal = false;
     this._activeProject = p;
     this._activeView = p.type === '3d_model' ? '3d' : p.type === 'svg' ? 'svg' : 'workspace';
     this._messages = [];
@@ -131,8 +182,10 @@ class JarvisDashboard extends LitElement {
     if (this._activeView === '3d') {
       await this.updateComplete;
       this._initThree();
+      const glb = this._files.find(f => f.file_type === 'glb');
       const stl = this._files.find(f => f.file_type === 'stl');
-      if (stl) await this._loadSTL(stl.id);
+      if (glb) await this._loadGLB(glb.id);
+      else if (stl) await this._loadSTL(stl.id);
     } else if (this._activeView === 'svg') {
       const svg = this._files.find(f => f.file_type === 'svg');
       if (svg) await this._loadSVGFile(svg.id);
@@ -172,14 +225,43 @@ class JarvisDashboard extends LitElement {
         this._projects = this._projects.filter(p => p.id !== id);
         if (this._activeProject?.id === id) {
           this._activeProject = null;
-          this._activeView = 'workspace';
           this._messages = [];
           this._files = [];
           this._disposeThree();
-          if (this._svgUrl) { URL.revokeObjectURL(this._svgUrl); this._svgUrl = null; }
         }
       }
     } catch (_) {}
+  }
+
+  async _onFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file || !this._activeProject) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    const fileType = ext === 'stl' ? 'stl' : ext === '3mf' ? '3mf' : 'svg';
+    try {
+      const r = await fetch(`${this._apiUrl}/api/projects/${this._activeProject.id}/files`, {
+        method: 'POST',
+        headers: { 'X-API-Key': this._config?.api_key ?? '', 'X-File-Name': file.name, 'X-File-Type': fileType },
+        body: await file.arrayBuffer(),
+      });
+      if (r.ok) {
+        const saved = await r.json();
+        this._files = [saved, ...this._files];
+        if (fileType === 'stl') {
+          this._activeView = '3d';
+          await this.updateComplete;
+          this._disposeThree(); this._initThree();
+          await this._loadSTL(saved.id);
+        } else {
+          this._activeView = 'svg';
+          await this._loadSVGFile(saved.id);
+        }
+      }
+    } catch (_) {}
+  }
+
+  _onChatKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
   }
 
   async _sendChat() {
@@ -187,65 +269,517 @@ class JarvisDashboard extends LitElement {
     if (!msg || this._sending) return;
     this._chatInput = '';
     this._sending = true;
-    this._messages = [...this._messages, { id: '_u', role: 'user', content: msg }];
+    const history = this._messages.slice(-20).map(m => ({ role: m.role, content: m.content }));
+    this._messages = [...this._messages, { id: '_sending', role: 'user', content: msg }];
     try {
       const r = await fetch(`${this._apiUrl}/api/chat`, {
-        method: 'POST',
-        headers: this._apiHeaders,
-        body: JSON.stringify({
-          message: msg,
-          project_id: this._activeProject?.id ?? null,
-          history: this._messages.slice(-10).filter(m=>m.id!=='_sending').map(m=>({role:m.role,content:m.content})),
-        }),
+        method: 'POST', headers: this._apiHeaders,
+        body: JSON.stringify({ message: msg, project_id: this._activeProject?.id ?? null, history }),
       });
       if (r.ok) {
         const d = await r.json();
-        this._messages = [...this._messages, { id: '_j', role: 'jarvis', content: d.response }];
+        this._messages = this._messages.filter(m => m.id !== '_sending');
+        if (this._activeProject) {
+          await this._loadMessages(this._activeProject.id);
+        } else {
+          this._messages = [
+            ...this._messages,
+            { id: Date.now()+'u', role: 'user',   content: msg },
+            { id: Date.now()+'j', role: 'jarvis', content: d.response },
+          ];
+        }
+        if (d.search_results?.length) this._startSearchSession(d.search_results, d.search_query ?? '');
         this._loadLog();
-        await this.updateComplete;
-        const cm = this.shadowRoot?.querySelector('.chat-msgs');
-        if (cm) cm.scrollTop = cm.scrollHeight;
-      } else {
-        this._messages = [...this._messages, { id: '_e', role: 'jarvis', content: 'Something went wrong.' }];
       }
-    } catch (_) {
-      this._messages = [...this._messages, { id: '_e', role: 'jarvis', content: "Can't reach the API." }];
-    }
+    } catch (_) {}
     this._sending = false;
   }
 
-  _onChatKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendChat(); }
+  // ── Thingiverse search ────────────────────────────────────────────────────
+
+  _startSearchSession(results, query) {
+    const sid = Date.now();
+    this._searchSession = {
+      sid, query,
+      things: results.map(r => ({ ...r, status: 'idle', buffer: null, files: null, fileIndex: 0 })),
+    };
+    this._searchIndex = 0;
+    this._activeView = '3d';
+    this.updateComplete.then(() => {
+      this._disposeThree(); this._initThree();
+      this._loadSearchThing(0);
+    });
   }
 
-  async _onFileSelect(e) {
-    const file = e.target.files[0];
-    if (!file || !this._activeProject) return;
-    e.target.value = '';
-    const ext = file.name.split('.').pop().toLowerCase();
-    const fileType = ext === 'stl' ? 'stl' : 'svg';
-    const buf = await file.arrayBuffer();
+  async _loadSearchThing(idx) {
+    const session = this._searchSession;
+    if (!session) return;
+    const sid = session.sid;
+    const thing = session.things[idx];
+    if (!thing || thing.status === 'loaded' || thing.status === 'loading') return;
+
+    this._updateThing(idx, { status: 'loading' });
     try {
-      const r = await fetch(`${this._apiUrl}/api/projects/${this._activeProject.id}/files`, {
-        method: 'POST',
-        headers: { 'Content-Type':'application/octet-stream', 'X-API-Key': this._config?.api_key??'', 'X-File-Name': file.name, 'X-File-Type': fileType },
-        body: buf,
-      });
+      const fr = await fetch(`${this._apiUrl}/api/thingiverse/files?thing_id=${thing.id}`, { headers: this._apiHeaders });
+      if (this._searchSession?.sid !== sid) return;
+      if (!fr.ok) throw new Error(`files ${fr.status}`);
+      const files = await fr.json();
+      if (this._searchSession?.sid !== sid) return;
+      if (!files.length) throw new Error('no STL files');
+      this._updateThing(idx, { files, fileIndex: 0, status: 'loading' });
+      await this._fetchAndDisplaySTL(idx, files[0].id, sid);
+    } catch (e) {
+      if (this._searchSession?.sid !== sid) return;
+      this._updateThing(idx, { status: 'error', error: e.message });
+    }
+  }
+
+  async _fetchAndDisplaySTL(idx, fileId, sid) {
+    const session = this._searchSession;
+    if (!session || session.sid !== sid) return;
+    const thing = session.things[idx];
+    try {
+      const buf = await this._fetchSTL(thing.id, fileId);
+      if (this._searchSession?.sid !== sid) return;
+      this._updateThing(idx, { buffer: buf, status: 'loaded' });
+      if (idx === this._searchIndex) {
+        const geo = parseSTL(buf);
+        if (geo) { geo.computeVertexNormals(); this._loadSTLGeo(geo); }
+      }
+    } catch (e) {
+      if (this._searchSession?.sid !== sid) return;
+      this._updateThing(idx, { status: 'error', error: e.message });
+    }
+  }
+
+  async _fetchSTL(thingId, fileId) {
+    const r = await fetch(
+      `${this._apiUrl}/api/thingiverse/stl?thing_id=${thingId}&file_id=${fileId}`,
+      { headers: { 'X-API-Key': this._config?.api_key ?? '' } }
+    );
+    if (!r.ok) throw new Error(`STL ${r.status}`);
+    return r.arrayBuffer();
+  }
+
+  _updateThing(idx, patch) {
+    const session = this._searchSession;
+    if (!session) return;
+    const things = session.things.map((t, i) => i === idx ? { ...t, ...patch } : t);
+    this._searchSession = { ...session, things };
+  }
+
+  async _setSearchIndex(idx) {
+    const session = this._searchSession;
+    if (!session) return;
+    this._searchIndex = idx;
+    const thing = session.things[idx];
+    if (thing.status === 'loaded' && thing.buffer) {
+      const geo = parseSTL(thing.buffer);
+      if (geo) { geo.computeVertexNormals(); this._loadSTLGeo(geo); }
+    } else if (thing.status === 'idle') {
+      await this.updateComplete;
+      this._loadSearchThing(idx);
+    }
+    // Preload neighbours
+    const preload = [idx + 1, idx - 1].filter(i => i >= 0 && i < session.things.length);
+    for (const i of preload) {
+      const t = session.things[i];
+      if (t.status === 'idle') this._loadSearchThing(i);
+    }
+  }
+
+  _seeMoreFile() {
+    const session = this._searchSession;
+    if (!session) return;
+    const thing = session.things[this._searchIndex];
+    if (!thing.files?.length) return;
+    const next = (thing.fileIndex + 1) % thing.files.length;
+    this._updateThing(this._searchIndex, { fileIndex: next, status: 'loading', buffer: null });
+    const sid = session.sid;
+    this._fetchAndDisplaySTL(this._searchIndex, thing.files[next].id, sid);
+  }
+
+  async _loadMoreResults() {
+    const session = this._searchSession;
+    if (!session || this._loadingMore) return;
+    this._loadingMore = true;
+    const page = Math.floor(session.things.length / 10) + 1;
+    try {
+      const r = await fetch(`${this._apiUrl}/api/thingiverse/search?q=${encodeURIComponent(session.query)}&page=${page}`, { headers: this._apiHeaders });
       if (r.ok) {
-        const f = await r.json();
-        this._files = [f, ...this._files];
-        if (fileType === 'stl') {
-          this._activeView = '3d';
-          await this.updateComplete;
-          this._disposeThree(); this._initThree();
-          await this._loadSTL(f.id);
-        } else {
-          this._activeView = 'svg';
-          await this._loadSVGFile(f.id);
+        const more = await r.json();
+        if (more.length) {
+          const newThings = more.map(t => ({ ...t, status: 'idle', buffer: null, files: null, fileIndex: 0 }));
+          this._searchSession = { ...session, things: [...session.things, ...newThings] };
         }
       }
     } catch (_) {}
+    this._loadingMore = false;
   }
+
+  _exitSearch() {
+    this._clearSessionBlobs();
+    this._searchSession = null;
+    this._searchIndex = 0;
+  }
+
+  _clearSessionBlobs() {}
+
+  // Save ALL STL files from current search result to active project
+  async _saveThing() {
+    const session = this._searchSession;
+    if (!session || !this._activeProject) return;
+    const thing = session.things[this._searchIndex];
+    if (!thing.files?.length || thing.status !== 'loaded') return;
+    this._saving = true;
+    const saved = [];
+    for (let fi = 0; fi < thing.files.length; fi++) {
+      const file = thing.files[fi];
+      try {
+        const buf = (fi === thing.fileIndex && thing.buffer)
+          ? thing.buffer
+          : await this._fetchSTL(thing.id, file.id);
+        const r = await fetch(`${this._apiUrl}/api/projects/${this._activeProject.id}/files`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': this._config?.api_key ?? '',
+            'X-File-Name': file.name,
+            'X-File-Type': 'stl',
+          },
+          body: buf,
+        });
+        if (r.ok) saved.push(await r.json());
+      } catch (_) {}
+    }
+    this._saving = false;
+    if (saved.length) {
+      this._files = [...saved, ...this._files];
+      this._exitSearch();
+      this._activeView = '3d';
+      await this.updateComplete;
+      this._disposeThree(); this._initThree();
+      await this._loadSTL(saved[0].id);
+    }
+  }
+
+  // ── Print modal ───────────────────────────────────────────────────────────
+
+  _showPrintModal() {
+    if (!this._activeProject) return;
+    this._printModal = true;
+  }
+
+  _hidePrintModal() {
+    this._printModal = false;
+  }
+
+  // ── Meshy.AI text-to-3D ──────────────────────────────────────────────────
+
+  _openMeshyModal() {
+    this._meshyModal    = true;
+    this._meshyStatus   = 'idle';
+    this._meshyError    = null;
+    this._meshyTask     = null;
+    this._meshyProgress = 0;
+    this._meshyThumb    = null;
+  }
+
+  _closeMeshyModal() {
+    if (this._meshyPollTimer) { clearInterval(this._meshyPollTimer); this._meshyPollTimer = null; }
+    this._meshyModal  = false;
+    this._meshyStatus = 'idle';
+  }
+
+  async _startMeshyGenerate() {
+    const prompt = this._meshyPrompt.trim();
+    if (!prompt) return;
+    this._meshyStatus   = 'pending';
+    this._meshyError    = null;
+    this._meshyProgress = 0;
+    try {
+      const r = await fetch(`${this._apiUrl}/api/meshy/generate`, {
+        method: 'POST', headers: this._apiHeaders,
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      this._meshyTask   = data.task_id;
+      this._meshyStatus = 'generating';
+      this._addLog('meshy', `Meshy generating: "${prompt}"`);
+      this._meshyPollTimer = setInterval(() => this._pollMeshyTask(), 4000);
+    } catch (e) {
+      this._meshyStatus = 'error';
+      this._meshyError  = e.message;
+      this._addLog('error', `Meshy start failed: ${e.message}`);
+    }
+  }
+
+  async _pollMeshyTask() {
+    if (!this._meshyTask) return;
+    try {
+      const r = await fetch(`${this._apiUrl}/api/meshy/status/${this._meshyTask}`, { headers: this._apiHeaders });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error ?? `HTTP ${r.status}`);
+      this._meshyProgress = d.progress ?? this._meshyProgress;
+      if (d.thumbnail_url) this._meshyThumb = d.thumbnail_url;
+      if (d.status === 'SUCCEEDED') {
+        clearInterval(this._meshyPollTimer); this._meshyPollTimer = null;
+        this._meshyStatus = 'saving';
+        await this._saveMeshyModel();
+      } else if (d.status === 'FAILED' || d.status === 'EXPIRED') {
+        clearInterval(this._meshyPollTimer); this._meshyPollTimer = null;
+        this._meshyStatus = 'error';
+        this._meshyError  = d.error ?? `Task ${d.status.toLowerCase()}`;
+        this._addLog('error', `Meshy failed: ${this._meshyError}`);
+      }
+    } catch (e) {
+      // Don't kill polling on transient errors — just log
+      console.warn('[Jarvis] Meshy poll error:', e.message);
+    }
+  }
+
+  async _saveMeshyModel() {
+    try {
+      const r = await fetch(`${this._apiUrl}/api/meshy/save`, {
+        method: 'POST', headers: this._apiHeaders,
+        body: JSON.stringify({ task_id: this._meshyTask, project_id: this._activeProject?.id }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      this._files = [data, ...this._files];
+      this._meshyStatus = 'done';
+      this._addLog('meshy', `✅ Meshy model saved: ${data.filename}`);
+      // Switch to 3D view and load the GLB
+      this._activeView = '3d';
+      await this.updateComplete;
+      this._disposeThree(); this._initThree();
+      await this._loadGLB(data.id);
+    } catch (e) {
+      this._meshyStatus = 'error';
+      this._meshyError  = e.message;
+      this._addLog('error', `Meshy save failed: ${e.message}`);
+    }
+  }
+
+  async _loadGLB(fileId) {
+    try {
+      const { GLTFLoader } = await import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js');
+      const r = await fetch(`${this._apiUrl}/api/files/${fileId}`, { headers: { 'X-API-Key': this._config?.api_key ?? '' } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const buf = await r.arrayBuffer();
+      const loader = new GLTFLoader();
+      loader.parse(buf, '', (gltf) => {
+        if (!this._three) return;
+        const { scene, camera, renderer, controls } = this._three;
+        // Clear existing meshes (keep lights)
+        scene.children.filter(c => c.isMesh || c.isGroup).forEach(c => scene.remove(c));
+        const model = gltf.scene;
+        // Centre and scale to fit view
+        const box = new THREE.Box3().setFromObject(model);
+        const centre = box.getCenter(new THREE.Vector3());
+        const size   = box.getSize(new THREE.Vector3()).length();
+        model.position.sub(centre);
+        const scale = 80 / size;
+        model.scale.setScalar(scale);
+        scene.add(model);
+        camera.position.set(0, 60, 120);
+        camera.lookAt(0, 0, 0);
+        if (controls) controls.update();
+        renderer.render(scene, camera);
+      }, (e) => { console.error('[Jarvis] GLB parse error', e); });
+    } catch (e) {
+      console.error('[Jarvis] GLB load failed:', e);
+    }
+  }
+
+  _renderMeshyModal() {
+    if (!this._meshyModal) return nothing;
+    const busy    = ['pending','generating','saving'].includes(this._meshyStatus);
+    const done    = this._meshyStatus === 'done';
+    const isError = this._meshyStatus === 'error';
+    const statusLabel = {
+      idle:       '',
+      pending:    'Starting job…',
+      generating: `Generating… ${this._meshyProgress}%`,
+      saving:     'Saving model…',
+      done:       '✅ Done! Model loaded in 3D viewer.',
+      error:      `❌ ${this._meshyError}`,
+    }[this._meshyStatus];
+
+    return html`
+      <div class="modal-overlay" @click=${e=>{ if(e.target===e.currentTarget && !busy) this._closeMeshyModal(); }}>
+        <div class="modal">
+          <div class="modal-title">⚡ Generate 3D Model</div>
+          <div class="modal-subtitle">Powered by Meshy.AI · ~5 credits preview</div>
+          ${this._meshyThumb ? html`<img src=${this._meshyThumb} style="width:100%;border-radius:6px;margin:8px 0">` : nothing}
+          <div class="modal-row" style="flex-direction:column;align-items:stretch;gap:6px">
+            <textarea
+              style="width:100%;min-height:72px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:8px;font-size:13px"
+              placeholder="Describe the model… e.g. 'a wall-mount bracket for a Raspberry Pi 4'"
+              .value=${this._meshyPrompt}
+              @input=${e=>this._meshyPrompt=e.target.value}
+              ?disabled=${busy}></textarea>
+          </div>
+          ${statusLabel ? html`<div class="modal-subtitle" style="color:${isError?'#e05':done?'#0d6':'#8cf'}">${statusLabel}</div>` : nothing}
+          ${busy ? html`
+            <div style="height:4px;background:#0a2030;border-radius:2px;overflow:hidden;margin:4px 0">
+              <div style="height:100%;width:${this._meshyProgress||10}%;background:#00aaff;transition:width 0.5s;border-radius:2px"></div>
+            </div>` : nothing}
+          <div class="modal-btns">
+            <button class="modal-btn-cancel" @click=${this._closeMeshyModal} ?disabled=${busy && !isError}>
+              ${done||isError ? 'Close' : 'Cancel'}
+            </button>
+            ${!done ? html`
+              <button class="modal-btn-save" @click=${this._startMeshyGenerate}
+                ?disabled=${busy || !this._meshyPrompt.trim() || !this._activeProject}>
+                ${busy ? '⏳ Generating…' : '⚡ Generate'}
+              </button>` : nothing}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  async _submitPrint(e) {
+    e.preventDefault();
+    const form = e.target;
+    const stl  = this._files.find(f => f.file_type === '3mf')
+              || this._files.find(f => f.file_type === 'stl');
+    if (!stl) return;
+
+    if (!this._holomatUrl) {
+      alert('HoloMat pipeline not configured.\n\nAdd holomat_url to the card config (e.g. https://holomat.nannerserver.com).');
+      return;
+    }
+
+    const btn = form.querySelector('[type=submit]');
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Sending…';
+
+    try {
+      const payload = {
+        file_id:    stl.id,
+        filename:   stl.filename,
+        file_type:  stl.file_type,
+        quality:    form.quality.value,
+        infill:     form.infill.value,
+        supports:   form.supports.value,
+        project_id: this._activeProject?.id ?? null,
+      };
+      this._addLog('print', `Sending print job: ${stl.filename} (${payload.quality}, ${payload.infill}% infill)`);
+
+      const r = await fetch(`${this._holomatUrl}/print`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+
+      if (r.ok) {
+        this._addLog('print', `✅ Print job sent: ${data.filename ?? stl.filename}`);
+        this._hidePrintModal();
+        alert(`✅ Print job sent to NANN3R1S!\n\nFile: ${data.filename ?? stl.filename}\nProfile: ${data.profile ?? payload.quality}\nInfill: ${data.infill ?? payload.infill}%`);
+      } else {
+        // Surface the error detail from the API (OrcaSlicer not installed, etc.)
+        const msg = typeof data.detail === 'object'
+          ? (data.detail.error ?? JSON.stringify(data.detail))
+          : (data.detail ?? data.error ?? `HTTP ${r.status}`);
+        this._addLog('error', `Print failed: ${msg}`);
+        alert(`Print failed:\n\n${msg}`);
+      }
+    } catch (err) {
+      this._addLog('error', `Cannot reach HoloMat pipeline: ${err.message}`);
+      alert(`Cannot reach HoloMat pipeline:\n\n${err.message}\n\nIs the server running at ${this._holomatUrl}?`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  }
+
+  // ── Voice input ───────────────────────────────────────────────────────────
+
+  async _toggleMic() {
+    if (this._recording) {
+      this._mediaRecorder?.stop();
+      this._recording = false;
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const mimeType = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4']
+        .find(t => MediaRecorder.isTypeSupported(t)) ?? '';
+      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      const chunks = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        this._transcribing = true;
+        try {
+          const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+          const r = await fetch(`${this._apiUrl}/api/stt`, {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type, 'X-API-Key': this._config?.api_key ?? '' },
+            body: await blob.arrayBuffer(),
+          });
+          if (r.ok) {
+            const d = await r.json();
+            if (d.text) this._chatInput = d.text;
+          }
+        } catch (_) {}
+        this._transcribing = false;
+      };
+      mr.start(100);
+      this._mediaRecorder = mr;
+      this._recording = true;
+    } catch (e) {
+      alert('Microphone access denied or unavailable.');
+    }
+  }
+
+  // ── OpenSCAD generation ───────────────────────────────────────────────────
+
+  _parseContent(text) {
+    const parts = [];
+    const re = /```(openscad|scad)[ \t]*\n?([\s\S]*?)```/gi;
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) parts.push({ type: 'text', text: text.slice(last, m.index) });
+      parts.push({ type: 'code', lang: m[1].toLowerCase(), code: m[2].trim() });
+      last = re.lastIndex;
+    }
+    if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
+    return parts.length ? parts : [{ type: 'text', text }];
+  }
+
+  async _generateFromCode(code) {
+    if (!this._activeProject || !this._holomatUrl) return;
+    this._generating = true;
+    this._genError = null;
+    try {
+      const fname = `${this._activeProject.name.replace(/\s+/g, '_')}_generated.stl`;
+      const r = await fetch(`${this._holomatUrl}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, project_id: this._activeProject.id, filename: fname }),
+      });
+      if (r.ok) {
+        await this._loadFiles(this._activeProject.id);
+        this._activeView = '3d';
+        await this.updateComplete;
+        this._disposeThree(); this._initThree();
+        const stl = this._files.find(f => f.file_type === 'stl');
+        if (stl) await this._loadSTL(stl.id);
+      } else {
+        const body = await r.text().catch(() => '');
+        this._genError = `Pipeline error ${r.status}${body ? ': ' + body.slice(0, 120) : ''}`;
+      }
+    } catch (e) {
+      this._genError = `Cannot reach pipeline: ${e.message}`;
+    }
+    this._generating = false;
+  }
+
+  // ── Three.js ──────────────────────────────────────────────────────────────
 
   _makeOrbit(canvas, camera, initRadius) {
     let down = false, lastX = 0, lastY = 0;
@@ -286,9 +820,10 @@ class JarvisDashboard extends LitElement {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setSize(w, h, false);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const key = new THREE.DirectionalLight(0x00f5ff, 1.5); key.position.set(5,10,5); scene.add(key);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.3); fill.position.set(-5,-5,-5); scene.add(fill);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const key  = new THREE.DirectionalLight(0x00f5ff, 1.2); key.position.set(5, 10, 5);   scene.add(key);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.5); fill.position.set(-6, -4, 3);  scene.add(fill);
+    const rim  = new THREE.DirectionalLight(0x0088aa, 0.4); rim.position.set(0, -2, -8);   scene.add(rim);
     const geo      = new THREE.IcosahedronGeometry(1.5, 1);
     const demoMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color:0x00f5ff, opacity:0.85, transparent:true, shininess:80 }));
     const demoWire = new THREE.Mesh(geo.clone(), new THREE.MeshBasicMaterial({ color:0x003d44, wireframe:true }));
@@ -319,6 +854,31 @@ class JarvisDashboard extends LitElement {
     this._three = null;
   }
 
+  _loadSTLGeo(geo) {
+    if (!this._three) return;
+    const { scene, demoMesh, demoWire, orbit } = this._three;
+    scene.remove(demoMesh); scene.remove(demoWire);
+    scene.children.filter(c => c.userData.stlMesh).forEach(c => {
+      c.geometry?.dispose(); c.material?.dispose(); scene.remove(c);
+    });
+    geo.computeVertexNormals();
+    geo.center();
+    const bbox = new THREE.Box3().setFromBufferAttribute(geo.getAttribute('position'));
+    const size = bbox.getSize(new THREE.Vector3());
+    const maxD = Math.max(size.x, size.y, size.z) || 1;
+    const scale = 3 / maxD;
+    const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+      color: 0x00c8e0, specular: new THREE.Color(0x003344), shininess: 80,
+    }));
+    mesh.scale.setScalar(scale);
+    mesh.userData.stlMesh = true;
+    const wire = new THREE.Mesh(geo.clone(), new THREE.MeshBasicMaterial({ color: 0x003d44, wireframe: true, opacity: 0.12, transparent: true }));
+    wire.scale.setScalar(scale);
+    wire.userData.stlMesh = true;
+    scene.add(mesh, wire);
+    orbit.reset();
+  }
+
   async _loadSTL(fileId) {
     if (!this._three) return;
     try {
@@ -326,16 +886,7 @@ class JarvisDashboard extends LitElement {
       if (!r.ok) return;
       const geo = parseSTL(await r.arrayBuffer());
       if (!geo) return;
-      geo.computeBoundingBox();
-      const center = new THREE.Vector3(); geo.boundingBox.getCenter(center);
-      geo.translate(-center.x,-center.y,-center.z);
-      const size = new THREE.Vector3(); geo.boundingBox.getSize(size);
-      const s = 3/Math.max(size.x,size.y,size.z); geo.scale(s,s,s);
-      const { scene, demoMesh, demoWire } = this._three;
-      scene.remove(demoMesh, demoWire);
-      scene.add(new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color:0x00f5ff, shininess:60 })));
-      scene.add(new THREE.Mesh(geo.clone(), new THREE.MeshBasicMaterial({ color:0x003d44, wireframe:true })));
-      this._three.orbit.reset();
+      this._loadSTLGeo(geo);
     } catch (_) {}
   }
 
@@ -352,7 +903,7 @@ class JarvisDashboard extends LitElement {
   updated(changed) {
     if (changed.has('_activeView')) {
       if (this._activeView !== '3d') this._disposeThree();
-      else if (this._activeProject) this.updateComplete.then(() => this._initThree());
+      else if (this._activeProject || this._searchSession) this.updateComplete.then(() => this._initThree());
     }
   }
 
@@ -361,6 +912,8 @@ class JarvisDashboard extends LitElement {
     this._disposeThree();
     if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
   }
+
+  // ── Styles ────────────────────────────────────────────────────────────────
 
   static styles = css`
     :host {
@@ -522,23 +1075,26 @@ class JarvisDashboard extends LitElement {
     .le-proj { color: var(--text-dim); font-size: .65rem; flex-shrink: 0; }
     .le-text { color: var(--text); flex: 1; }
 
-    /* ── New Project Modal ── */
+    /* ── Modals (new project + print) ── */
     .modal-overlay {
       position: absolute; inset: 0; background: rgba(0,0,0,.75);
       display: flex; align-items: center; justify-content: center; z-index: 200;
     }
     .modal {
       background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius);
-      padding: 18px; width: 250px; display: flex; flex-direction: column; gap: 10px;
+      padding: 18px; width: 280px; display: flex; flex-direction: column; gap: 10px;
       box-shadow: 0 0 40px rgba(0,245,255,.12);
     }
     .modal-title { font-size: .72rem; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
+    .modal-subtitle { font-size: .72rem; color: var(--text-dim); margin-top: -4px; }
     .modal input, .modal select {
       width: 100%; background: var(--surface2); border: 1px solid var(--border);
       border-radius: 6px; color: var(--text); font-family: inherit; font-size: .82rem; padding: 7px 9px;
     }
     .modal input:focus, .modal select:focus { outline: none; border-color: var(--accent); }
     .modal select option { background: var(--surface); }
+    .modal-row { display: flex; align-items: center; gap: 8px; }
+    .modal-label { font-size: .7rem; color: var(--text-dim); min-width: 58px; flex-shrink: 0; }
     .modal-btns { display: flex; gap: 8px; margin-top: 2px; }
     .modal-btn-cancel {
       flex: 1; padding: 7px; border-radius: 6px; cursor: pointer;
@@ -551,6 +1107,68 @@ class JarvisDashboard extends LitElement {
       background: var(--accent); border: none; color: #000; font-size: .78rem; font-weight: 700;
     }
     .modal-btn-save:hover { opacity: .85; }
+    .modal-no-stl { font-size: .75rem; color: #ffaa00; text-align: center; padding: 6px 0; }
+
+    /* ── OpenSCAD code block ── */
+    .code-block { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; margin: 6px 0; overflow: hidden; }
+    .code-lang { font-size: .6rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--accent); padding: 3px 8px; background: rgba(0,245,255,.08); border-bottom: 1px solid #30363d; }
+    .code-pre { font-family: 'JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: .7rem; line-height: 1.6; color: #e6edf3; padding: 8px; overflow-x: auto; white-space: pre; max-height: 180px; overflow-y: auto; margin: 0; }
+    .code-pre::-webkit-scrollbar { width: 3px; height: 3px; }
+    .code-pre::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    .gen-btn { display: block; width: 100%; background: rgba(0,245,255,.08); border: none; border-top: 1px solid #30363d; color: var(--accent); cursor: pointer; font-size: .72rem; font-weight: 700; letter-spacing: .5px; padding: 6px; transition: background .15s; }
+    .gen-btn:hover:not(:disabled) { background: rgba(0,245,255,.18); }
+    .gen-btn:disabled { opacity: .45; cursor: not-allowed; }
+    .gen-error { font-size: .68rem; color: #ff6b6b; padding: 4px 8px; background: rgba(255,80,80,.08); border-top: 1px solid #30363d; }
+
+    /* ── Search mode ── */
+    .search-layout { position: absolute; inset: 0; display: flex; flex-direction: column; }
+    .search-nav {
+      display: flex; align-items: center; gap: 6px; padding: 5px 8px; flex-shrink: 0;
+      background: rgba(0,0,0,.6); backdrop-filter: blur(4px); border-bottom: 1px solid var(--border); z-index: 10;
+    }
+    .sn-arrow { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); cursor: pointer; font-size: .8rem; padding: 2px 7px; transition: all .15s; }
+    .sn-arrow:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .sn-arrow:disabled { opacity: .3; cursor: not-allowed; }
+    .sn-pos { font-size: .7rem; color: var(--accent); font-weight: 700; flex-shrink: 0; min-width: 36px; text-align: center; }
+    .sn-title { flex: 1; font-size: .75rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sn-meta { font-size: .65rem; color: var(--text-dim); flex-shrink: 0; }
+    .sn-close { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: .9rem; padding: 2px 5px; }
+    .sn-close:hover { color: #ff5555; }
+    .search-canvas { flex: 1; position: relative; overflow: hidden; }
+    .search-bar {
+      display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 5px 8px; flex-shrink: 0;
+      background: rgba(0,0,0,.6); backdrop-filter: blur(4px); border-top: 1px solid var(--border); z-index: 10;
+    }
+    .sb-btn {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+      color: var(--text-dim); cursor: pointer; font-size: .72rem; padding: 3px 10px; transition: all .15s;
+    }
+    .sb-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .sb-btn:disabled { opacity: .35; cursor: not-allowed; }
+    .sb-btn.accent { border-color: var(--accent); color: var(--accent); background: rgba(0,245,255,.06); }
+    .sb-btn.accent:hover:not(:disabled) { background: rgba(0,245,255,.15); }
+    .sb-spacer { flex: 1; }
+    .search-loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+    .search-loading .spin { width: 28px; height: 28px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .search-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+    .search-error p { font-size: .78rem; color: #ff6b6b; }
+
+    /* ── Mic button ── */
+    .mic-btn {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text-dim); cursor: pointer; font-size: 1rem; padding: 0 8px;
+      transition: all .15s; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .mic-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .mic-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .mic-btn.active { border-color: #ff5555; color: #ff5555; animation: mic-pulse 1s ease-in-out infinite; }
+    @keyframes mic-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,85,85,.4)} 50%{box-shadow:0 0 0 5px rgba(255,85,85,0)} }
+    .mic-spin {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin .8s linear infinite;
+    }
 
     @media (max-width: 680px) {
       .root { height: auto; min-height: 400px; }
@@ -562,15 +1180,41 @@ class JarvisDashboard extends LitElement {
     }
   `;
 
+  // ── Demo data ──────────────────────────────────────────────────────────────
+
   get _demoMessages() { return [{ id:'1', role:'jarvis', content:'Jarvis online. How can I help?' }]; }
   get _demoLog() {
     const t = d => new Date(Date.now()-d*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
     return [{ type:'sys', time:t(5), text:'Connected to Jarvis API' }];
   }
 
+  // ── Render helpers ────────────────────────────────────────────────────────
+
   _renderMsg(m) {
-    return html`<div class="msg ${m.role} ${m.id==='_sending'?'sending':''}">
-      <div class="msg-role">${m.role==='jarvis'?'⬡ Jarvis':'▶ You'}</div>${m.content}</div>`;
+    const isJarvis = m.role === 'jarvis';
+    const parts = this._parseContent(m.content ?? '');
+    const hasProject  = !!this._activeProject;
+    const hasPipeline = !!this._holomatUrl;
+    return html`
+      <div class="msg ${m.role} ${m.id==='_sending'?'sending':''}">
+        <div class="msg-role">${isJarvis?'⬡ Jarvis':'▶ You'}</div>
+        ${parts.map(p => p.type === 'code'
+          ? html`<div class="code-block">
+              <div class="code-lang">OpenSCAD</div>
+              <pre class="code-pre">${p.code}</pre>
+              ${isJarvis ? html`
+                <button class="gen-btn"
+                  ?disabled=${this._generating || !hasProject || !hasPipeline}
+                  title=${!hasProject ? 'Select a project first' : !hasPipeline ? 'HoloMat pipeline not configured' : 'Render to STL'}
+                  @click=${() => this._generateFromCode(p.code)}>
+                  ${this._generating ? '⏳ Generating…' : !hasProject ? '⚙ Generate STL — select a project first' : '⚙ Generate STL'}
+                </button>
+                ${this._genError ? html`<div class="gen-error">⚠ ${this._genError}</div>` : nothing}
+              ` : nothing}
+            </div>`
+          : html`<span style="white-space:pre-wrap">${p.text}</span>`
+        )}
+      </div>`;
   }
 
   _renderProjCard(p) {
@@ -619,7 +1263,124 @@ class JarvisDashboard extends LitElement {
       </div>`;
   }
 
+  _renderPrintModal() {
+    if (!this._printModal) return nothing;
+    // Prefer pre-sliced .3mf (ready to send), fall back to .stl
+    const printFile = this._files.find(f => f.file_type === '3mf')
+                   || this._files.find(f => f.file_type === 'stl');
+    const is3mf = printFile?.file_type === '3mf';
+    return html`
+      <div class="modal-overlay" @click=${e=>{ if(e.target===e.currentTarget) this._hidePrintModal(); }}>
+        <div class="modal">
+          <div class="modal-title">🖨 Print to NANN3R1S</div>
+          ${printFile
+            ? html`
+              <div class="modal-subtitle">
+                ${printFile.filename}
+                ${is3mf
+                  ? html`<span class="badge" style="margin-left:8px;background:#1a6b3a">✓ Pre-sliced</span>`
+                  : html`<span class="badge" style="margin-left:8px;background:#7a4a00">⚠ Needs slicing</span>`}
+              </div>
+              ${!is3mf ? html`
+                <div class="modal-no-stl" style="margin-bottom:12px">
+                  STL detected. Slice in Bambu Studio first:<br>
+                  File → Export → Export Sliced File (.3mf) → upload here.
+                </div>` : nothing}
+              <form @submit=${this._submitPrint}>
+                <div class="modal-row">
+                  <span class="modal-label">Quality</span>
+                  <select name="quality" ?disabled=${!is3mf}>
+                    <option value="draft">Draft (0.3mm)</option>
+                    <option value="standard" selected>Standard (0.2mm)</option>
+                    <option value="fine">Fine (0.1mm)</option>
+                  </select>
+                </div>
+                <div class="modal-row">
+                  <span class="modal-label">Infill</span>
+                  <select name="infill" ?disabled=${!is3mf}>
+                    <option value="15">15% — Light</option>
+                    <option value="30" selected>30% — Standard</option>
+                    <option value="50">50% — Strong</option>
+                    <option value="80">80% — Solid</option>
+                  </select>
+                </div>
+                <div class="modal-row">
+                  <span class="modal-label">Supports</span>
+                  <select name="supports" ?disabled=${!is3mf}>
+                    <option value="off" selected>Off</option>
+                    <option value="auto">Auto</option>
+                    <option value="on">On</option>
+                  </select>
+                </div>
+                <div class="modal-btns">
+                  <button type="button" class="modal-btn-cancel" @click=${this._hidePrintModal}>Cancel</button>
+                  <button type="submit" class="modal-btn-save" ?disabled=${!is3mf}>🖨 Send to Printer</button>
+                </div>
+              </form>`
+            : html`
+              <div class="modal-no-stl">⚠ No printable file in this project.<br>Upload an STL or pre-sliced .3mf.</div>
+              <div class="modal-btns">
+                <button class="modal-btn-cancel" @click=${this._hidePrintModal}>Close</button>
+              </div>`
+          }
+        </div>
+      </div>`;
+  }
+
+  _renderSearchConsole() {
+    const session = this._searchSession;
+    if (!session) return nothing;
+    const thing  = session.things[this._searchIndex];
+    const total  = session.things.length;
+    const isLast = this._searchIndex === total - 1;
+    const fileCount = thing.files?.length ?? 0;
+    const fileLabel = fileCount > 1 ? `File ${thing.fileIndex + 1}/${fileCount} →` : nothing;
+
+    let body;
+    if (thing.status === 'loading' || thing.status === 'idle') {
+      body = html`<div class="search-loading"><div class="spin"></div><span style="font-size:.75rem;color:var(--text-dim)">Loading model…</span></div>`;
+    } else if (thing.status === 'error') {
+      body = html`<div class="search-error">
+        <p>Could not load model.</p>
+        <p style="font-size:.65rem;color:var(--text-dim)">${thing.error ?? ''}</p>
+        <button class="act" @click=${()=>this._loadSearchThing(this._searchIndex)}>↻ Retry</button>
+      </div>`;
+    } else {
+      body = html`<div class="ws-canvas-wrap"><canvas id="three-canvas"></canvas></div>`;
+    }
+
+    return html`
+      <div class="search-layout">
+        <div class="search-nav">
+          <button class="sn-arrow" ?disabled=${this._searchIndex===0} @click=${()=>this._setSearchIndex(this._searchIndex-1)}>◀</button>
+          <span class="sn-pos">${this._searchIndex+1}/${total}</span>
+          <button class="sn-arrow" ?disabled=${this._searchIndex===total-1} @click=${()=>this._setSearchIndex(this._searchIndex+1)}>▶</button>
+          <span class="sn-title">${thing.title}</span>
+          <span class="sn-meta">♥ ${thing.likes} · ⬇ ${thing.downloads}</span>
+          <button class="sn-close" title="Exit search" @click=${this._exitSearch}>✕</button>
+        </div>
+        <div class="search-canvas">${body}</div>
+        <div class="search-bar">
+          ${fileCount > 1 ? html`
+            <button class="sb-btn" @click=${this._seeMoreFile}
+              ?disabled=${thing.status==='loading'}>${fileLabel}</button>` : nothing}
+          <button class="sb-btn accent"
+            ?disabled=${thing.status!=='loaded' || !this._activeProject || this._saving}
+            title=${!this._activeProject ? 'Select a project first' : 'Save all STL files from this result to the active project'}
+            @click=${this._saveThing}>
+            ${this._saving ? '⏳ Saving…' : '⬇ Save to Project'}
+          </button>
+          <span class="sb-spacer"></span>
+          ${isLast ? html`
+            <button class="sb-btn" ?disabled=${this._loadingMore} @click=${this._loadMoreResults}>
+              ${this._loadingMore ? '⏳ Loading…' : 'Load More ▶'}
+            </button>` : nothing}
+        </div>
+      </div>`;
+  }
+
   _renderWorkspaceSurface() {
+    if (this._searchSession) return this._renderSearchConsole();
     if (!this._activeProject) return html`<div class="ws-idle"><div class="watermark">Jarvis</div><p>Select or create a project</p></div>`;
     const tabs = html`<div class="view-tabs">
       <button class="vt ${this._activeView==='workspace'?'on':''}" @click=${()=>this._activeView='workspace'}>Info</button>
@@ -643,9 +1404,11 @@ class JarvisDashboard extends LitElement {
     const log      = this._log.length ? this._log : this._demoLog;
     const lastLog  = log.at(-1);
     return html`
-      <input type="file" id="fu" accept=".stl,.svg" style="display:none" @change=${this._onFileSelect}>
+      <input type="file" id="fu" accept=".stl,.svg,.3mf" style="display:none" @change=${this._onFileSelect}>
       <div class="root">
         ${this._renderNewProjectModal()}
+        ${this._renderPrintModal()}
+        ${this._renderMeshyModal()}
         <div class="statusbar">
           <span class="logo">Jarvis</span>
           <div class="pulse"></div>
@@ -667,6 +1430,12 @@ class JarvisDashboard extends LitElement {
               <div class="chat-footer">
                 <textarea .value=${this._chatInput} @input=${e=>this._chatInput=e.target.value}
                   @keydown=${this._onChatKey} ?disabled=${this._sending} placeholder="Ask Jarvis…"></textarea>
+                <button class="mic-btn ${this._recording?'active':''}"
+                  title=${this._recording?'Stop recording':'Hold to speak'}
+                  ?disabled=${this._transcribing||this._sending}
+                  @click=${this._toggleMic}>
+                  ${this._transcribing ? html`<span class="mic-spin"></span>` : this._recording ? '⏹' : '🎙'}
+                </button>
                 <button class="send-btn" ?disabled=${this._sending} @click=${this._sendChat}>▶</button>
               </div>
             </div>
@@ -686,7 +1455,8 @@ class JarvisDashboard extends LitElement {
           </div>
         </div>
         <div class="actionbar">
-          <button class="act" ?disabled=${!haProj}>🖨 Print</button>
+          <button class="act" ?disabled=${!haProj} @click=${this._showPrintModal}>🖨 Print</button>
+          <button class="act" ?disabled=${!haProj} @click=${this._openMeshyModal}>⚡ Generate</button>
           <button class="act" ?disabled=${!haProj}>✂ Cut</button>
           <button class="act" ?disabled=${!haProj}>⬇ Export</button>
           <button class="act" ?disabled=${!haProj} @click=${()=>this.shadowRoot.querySelector('#fu').click()}>⬆ Upload</button>
