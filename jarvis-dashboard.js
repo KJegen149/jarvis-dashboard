@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.25
+// Jarvis Hub Dashboard v0.26
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -614,9 +614,10 @@ class JarvisDashboard extends LitElement {
           model.position.sub(centre);
           model.scale.setScalar(80 / Math.max(size, 0.001));
           scene.add(model);
-          const dist = Math.max(size * 1.6, 120);
-          camera.position.set(0, dist * 0.45, dist);
-          camera.lookAt(0, 0, 0);
+          // Sync orbit controller: radius to see the full scaled model,
+          // min = nose-close, max = way back for overview
+          const viewRadius = 140;
+          this._three.orbit.resetTo(viewRadius, 20, viewRadius * 5);
         }
         console.log('[Jarvis] GLB loaded:', gltf.scene.children.length, 'top-level nodes');
       }, (e) => { console.error('[Jarvis] GLB parse error:', e); draco.dispose(); });
@@ -822,7 +823,8 @@ class JarvisDashboard extends LitElement {
 
   _makeOrbit(canvas, camera, initRadius) {
     let down = false, lastX = 0, lastY = 0;
-    let theta = 0, phi = Math.PI / 2.5, radius = initRadius;
+    let theta = 0, phi = Math.PI / 2.5;
+    let radius = initRadius, minR = initRadius * 0.1, maxR = initRadius * 4;
     const update = () => {
       camera.position.set(
         radius * Math.sin(phi) * Math.sin(theta),
@@ -841,11 +843,23 @@ class JarvisDashboard extends LitElement {
     canvas.addEventListener('mouseup',    () => down=false);
     canvas.addEventListener('mouseleave', () => down=false);
     canvas.addEventListener('wheel', e => {
-      radius = Math.max(1, Math.min(20, radius+e.deltaY*0.02));
+      // Multiplicative zoom — feels consistent at any radius (STL ~6 or GLB ~140)
+      radius = Math.max(minR, Math.min(maxR, radius * (1 + e.deltaY * 0.001)));
       update(); e.preventDefault();
     }, { passive:false });
     update();
-    return { reset: () => { theta=0; phi=Math.PI/2.5; radius=initRadius; update(); } };
+    return {
+      // Call this after loading a model to sync radius + zoom range
+      resetTo: (r, mn, mx) => {
+        radius = r;
+        minR   = mn ?? r * 0.1;
+        maxR   = mx ?? r * 4;
+        theta  = 0;
+        phi    = Math.PI / 2.5;
+        update();
+      },
+      reset: () => { theta=0; phi=Math.PI/2.5; radius=initRadius; minR=initRadius*0.1; maxR=initRadius*4; update(); },
+    };
   }
 
   _initThree() {
