@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.24
+// Jarvis Hub Dashboard v0.25
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -577,30 +577,49 @@ class JarvisDashboard extends LitElement {
 
   async _loadGLB(fileId) {
     try {
-      const { GLTFLoader } = await import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js');
+      const [{ GLTFLoader }, { DRACOLoader }] = await Promise.all([
+        import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js'),
+        import('https://esm.sh/three@0.160.0/examples/jsm/loaders/DRACOLoader.js'),
+      ]);
+
+      // Draco decoder — Meshy preview models use Draco compression by default
+      const draco = new DRACOLoader();
+      draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/');
+
       const r = await fetch(`${this._apiUrl}/api/files/${fileId}`, { headers: { 'X-API-Key': this._config?.api_key ?? '' } });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const buf = await r.arrayBuffer();
+
       const loader = new GLTFLoader();
+      loader.setDRACOLoader(draco);
+
       loader.parse(buf, '', (gltf) => {
+        draco.dispose();
         if (!this._three) return;
-        const { scene, camera, renderer, controls } = this._three;
-        // Clear existing meshes (keep lights)
-        scene.children.filter(c => c.isMesh || c.isGroup).forEach(c => scene.remove(c));
+        const { scene, camera } = this._three;
+
+        // Clear previous model / STL meshes, keep lights
+        const toRemove = scene.children.filter(c => c.isMesh || c.isGroup);
+        toRemove.forEach(c => scene.remove(c));
+
         const model = gltf.scene;
-        // Centre and scale to fit view
-        const box = new THREE.Box3().setFromObject(model);
-        const centre = box.getCenter(new THREE.Vector3());
-        const size   = box.getSize(new THREE.Vector3()).length();
-        model.position.sub(centre);
-        const scale = 80 / size;
-        model.scale.setScalar(scale);
-        scene.add(model);
-        camera.position.set(0, 60, 120);
-        camera.lookAt(0, 0, 0);
-        if (controls) controls.update();
-        renderer.render(scene, camera);
-      }, (e) => { console.error('[Jarvis] GLB parse error', e); });
+        const box   = new THREE.Box3().setFromObject(model);
+
+        if (box.isEmpty()) {
+          console.warn('[Jarvis] GLB bounding box empty — model may have no geometry');
+          scene.add(model);
+        } else {
+          const centre = box.getCenter(new THREE.Vector3());
+          const size   = box.getSize(new THREE.Vector3()).length();
+          model.position.sub(centre);
+          model.scale.setScalar(80 / Math.max(size, 0.001));
+          scene.add(model);
+          const dist = Math.max(size * 1.6, 120);
+          camera.position.set(0, dist * 0.45, dist);
+          camera.lookAt(0, 0, 0);
+        }
+        console.log('[Jarvis] GLB loaded:', gltf.scene.children.length, 'top-level nodes');
+      }, (e) => { console.error('[Jarvis] GLB parse error:', e); draco.dispose(); });
     } catch (e) {
       console.error('[Jarvis] GLB load failed:', e);
     }
@@ -840,6 +859,7 @@ class JarvisDashboard extends LitElement {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setSize(w, h, false);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;   // correct PBR / GLB texture colours
     scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     const key  = new THREE.DirectionalLight(0x00f5ff, 1.2); key.position.set(5, 10, 5);   scene.add(key);
     const fill = new THREE.DirectionalLight(0xffffff, 0.5); fill.position.set(-6, -4, 3);  scene.add(fill);
