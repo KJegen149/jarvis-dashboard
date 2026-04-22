@@ -306,7 +306,7 @@ class JarvisDashboard extends LitElement {
         }
         if (d.search_results?.length) this._startSearchSession(d.search_results, d.search_query ?? '');
         // Auto-trigger Meshy if Jarvis responded with a meshy block
-        const meshyMatch = d.response?.match(/```meshy[^\n]*\n?([\s\S]*?)```/i);
+        const meshyMatch = d.response?.match(/```meshy[^\n]*\n?([\s\S]*?)(?:```|$)/i);
         if (meshyMatch && this._activeProject) {
           const prompt = meshyMatch[1].trim();
           this._meshyPrompt = prompt;
@@ -314,8 +314,8 @@ class JarvisDashboard extends LitElement {
           this._startMeshyGenerate();
         }
         // Auto-save SVG if Jarvis responded with an svg (or xml) block containing SVG markup
-        const _svgDirect = d.response?.match(/```svg[^\n]*\n([\s\S]*?)```/i);
-        const _svgXml    = d.response?.match(/```xml[^\n]*\n([\s\S]*?)```/i);
+        const _svgDirect = d.response?.match(/```svg[^\n]*\n([\s\S]*?)(?:```|$)/i);
+        const _svgXml    = d.response?.match(/```xml[^\n]*\n([\s\S]*?)(?:```|$)/i);
         // Accept ```xml only if the content actually starts with <svg
         const svgMatch = _svgDirect ?? (_svgXml?.[1]?.trim().toLowerCase().startsWith('<svg') ? _svgXml : null);
         if (svgMatch && this._activeProject) {
@@ -837,7 +837,8 @@ class JarvisDashboard extends LitElement {
     // [^\n]* allows anything after language tag (comments, extra text) before newline
     // \n? makes the newline optional (handles no-newline edge case)
     // xml is included to catch cases where Gemini uses ```xml for SVG content
-    const re = /```(openscad|scad|meshy|svg|xml)[^\n]*\n?([\s\S]*?)```/gi;
+    // (?:```|$) — closing ``` OR end-of-string, so truncated responses still get rendered
+    const re = /```(openscad|scad|meshy|svg|xml)[^\n]*\n?([\s\S]*?)(?:```|$)/gi;
     let last = 0, m;
     while ((m = re.exec(text)) !== null) {
       if (m.index > last) parts.push({ type: 'text', text: text.slice(last, m.index) });
@@ -1023,7 +1024,13 @@ class JarvisDashboard extends LitElement {
     if (!this._activeProject || !svgCode) return;
     this._svgSaving = true;
     try {
-      const blob     = new Blob([svgCode], { type: 'image/svg+xml' });
+      // Ensure root element is <svg> — Gemini sometimes uses <g> as root
+      let cleanSvg = svgCode.trim();
+      if (!cleanSvg.toLowerCase().startsWith('<svg')) {
+        cleanSvg = `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${cleanSvg}\n</svg>`;
+        this._addLog('sys', 'SVG root fixed: wrapped <g> in <svg> element');
+      }
+      const blob     = new Blob([cleanSvg], { type: 'image/svg+xml' });
       const filename = `${this._activeProject.name.replace(/\s+/g,'_')}_${Date.now()}.svg`;
       const r = await fetch(`${this._apiUrl}/api/projects/${this._activeProject.id}/files`, {
         method: 'POST',
@@ -1371,21 +1378,26 @@ class JarvisDashboard extends LitElement {
                   ${['pending','generating','saving'].includes(this._meshyStatus) ? '⏳ Generating…' : !hasProject ? '⚡ Select a project to generate' : '⚡ Re-generate'}
                 </button>` : nothing}
             </div>`;
-          if (p.type === 'svg') return html`
+          if (p.type === 'svg') {
+            // Ensure root is <svg> for inline preview (Gemini sometimes uses <g> as root)
+            const svgPreviewCode = p.code.trim().toLowerCase().startsWith('<svg')
+              ? p.code
+              : `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${p.code}\n</svg>`;
+            return html`
             <div class="code-block" style="border-color:#1a4a2a">
               <div class="code-lang" style="background:#1a4a2a">✂ SVG — Cricut Design</div>
               <div style="padding:8px;background:#fff;text-align:center;line-height:0">
-                <img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(p.code)}"
+                <img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgPreviewCode)}"
                      style="max-width:100%;max-height:140px;object-fit:contain"
                      alt="SVG preview">
               </div>
               ${isJarvis ? html`
                 <button class="gen-btn" style="background:#1a4a2a"
                   ?disabled=${!hasProject || this._svgSaving}
-                  @click=${() => this._saveSVGFromChat(p.code)}>
+                  @click=${() => this._saveSVGFromChat(svgPreviewCode)}>
                   ${this._svgSaving ? '⏳ Saving…' : !hasProject ? '✂ Save SVG — select a project first' : '✂ Save to Project & Preview'}
                 </button>` : nothing}
-            </div>`;
+            </div>`;}
           if (p.type === 'code') return html`
             <div class="code-block">
               <div class="code-lang">OpenSCAD</div>
