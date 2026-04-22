@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.27
+// Jarvis Hub Dashboard v0.28
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -1289,13 +1289,12 @@ class JarvisDashboard extends LitElement {
         ${parts.map(p => {
           if (p.type === 'meshy') return html`
             <div class="code-block" style="border-color:#003a6b">
-              <div class="code-lang" style="background:#003a6b">⚡ Meshy.AI</div>
-              <div style="padding:8px 10px;font-size:12px;color:#8cf;font-style:italic">${p.code}</div>
+              <div class="code-lang" style="background:#003a6b">⚡ Meshy.AI — 3D Generation</div>
               ${isJarvis ? html`
                 <button class="gen-btn" style="background:#003a6b"
                   ?disabled=${!hasProject || ['pending','generating','saving'].includes(this._meshyStatus)}
                   @click=${() => { this._meshyPrompt=p.code; this._meshyModal=true; this._startMeshyGenerate(); }}>
-                  ${['pending','generating','saving'].includes(this._meshyStatus) ? '⏳ Generating…' : !hasProject ? '⚡ Generating — select a project first' : '⚡ Generate with Meshy'}
+                  ${['pending','generating','saving'].includes(this._meshyStatus) ? '⏳ Generating…' : !hasProject ? '⚡ Select a project to generate' : '⚡ Re-generate'}
                 </button>` : nothing}
             </div>`;
           if (p.type === 'svg') return html`
