@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.28
+// Jarvis Hub Dashboard v0.29
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -276,7 +276,7 @@ class JarvisDashboard extends LitElement {
     try {
       const r = await fetch(`${this._apiUrl}/api/chat`, {
         method: 'POST', headers: this._apiHeaders,
-        body: JSON.stringify({ message: msg, project_id: this._activeProject?.id ?? null, history }),
+        body: JSON.stringify({ message: msg, project_id: this._activeProject?.id ?? null, project_type: this._activeProject?.type ?? null, history }),
       });
       if (r.ok) {
         const d = await r.json();
