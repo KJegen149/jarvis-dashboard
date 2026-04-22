@@ -70,6 +70,11 @@ class JarvisDashboard extends LitElement {
     _meshyStatus:     { state: true },
     _meshyThumb:      { state: true },
     _meshyError:      { state: true },
+    _meshyTab:        { state: true },   // 'text' | 'image'
+    _meshyMode:       { state: true },   // 'text' | 'image' — set at generate time, used for poll/save
+    _meshyImageUrl:   { state: true },
+    _meshyImageData:  { state: true },   // base64 string (from file upload)
+    _meshyImagePreview: { state: true }, // data URL for preview
     _svgSaving:       { state: true },
     _active3dFileId:  { state: true },
     _activeSvgFileId: { state: true },
@@ -110,6 +115,11 @@ class JarvisDashboard extends LitElement {
     this._meshyStatus    = 'idle';   // idle | pending | generating | saving | done | error
     this._meshyThumb     = null;
     this._meshyError     = null;
+    this._meshyTab      = 'text';    // 'text' | 'image'
+    this._meshyMode     = 'text';    // actual mode sent to API (set at generate time)
+    this._meshyImageUrl   = '';
+    this._meshyImageData  = null;    // base64 from file upload
+    this._meshyImagePreview = null;  // data URL for preview
     this._meshyPollTimer = null;
     this._svgSaving      = false;
     this._active3dFileId  = null;
@@ -305,14 +315,6 @@ class JarvisDashboard extends LitElement {
           ];
         }
         if (d.search_results?.length) this._startSearchSession(d.search_results, d.search_query ?? '');
-        // Auto-trigger Meshy if Jarvis responded with a meshy block
-        const meshyMatch = d.response?.match(/```meshy[^\n]*\n?([\s\S]*?)(?:```|$)/i);
-        if (meshyMatch && this._activeProject) {
-          const prompt = meshyMatch[1].trim();
-          this._meshyPrompt = prompt;
-          this._meshyModal  = true;
-          this._startMeshyGenerate();
-        }
         // Auto-save SVG if Jarvis responded with an svg (or xml) block containing SVG markup
         const _svgDirect = d.response?.match(/```svg[^\n]*\n([\s\S]*?)(?:```|$)/i);
         const _svgXml    = d.response?.match(/```xml[^\n]*\n([\s\S]*?)(?:```|$)/i);
@@ -514,6 +516,10 @@ class JarvisDashboard extends LitElement {
     this._meshyTask     = null;
     this._meshyProgress = 0;
     this._meshyThumb    = null;
+    this._meshyTab      = 'text';
+    this._meshyImageUrl = '';
+    this._meshyImageData = null;
+    this._meshyImagePreview = null;
   }
 
   _closeMeshyModal() {
@@ -522,27 +528,59 @@ class JarvisDashboard extends LitElement {
     this._meshyStatus = 'idle';
   }
 
+  async _onMeshyImageFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const dataUrl = ev.target.result;
+      // Strip data URL prefix to get raw base64 for Meshy API
+      this._meshyImageData    = dataUrl.split(',')[1] ?? dataUrl;
+      this._meshyImagePreview = dataUrl;
+      this._meshyImageUrl     = '';  // clear URL if file chosen
+    };
+    reader.readAsDataURL(file);
+  }
+
   async _startMeshyGenerate() {
-    const prompt = this._meshyPrompt.trim();
-    if (!prompt) return;
-    // Clear any previous poll timer before starting a new job
+    const prompt    = this._meshyPrompt.trim();
+    const imageUrl  = this._meshyImageUrl.trim();
+    const imageData = this._meshyImageData;
+    const usingImage = this._meshyTab === 'image' && (imageUrl || imageData);
+
+    if (!usingImage && !prompt) return;
+
     if (this._meshyPollTimer) { clearInterval(this._meshyPollTimer); this._meshyPollTimer = null; }
     this._meshyStatus   = 'pending';
     this._meshyError    = null;
     this._meshyProgress = 0;
     this._meshyTask     = null;
-    const url = `${this._apiUrl}/api/meshy/generate`;
-    console.log('[Jarvis] Meshy generate → POST', url, '| prompt:', prompt.slice(0, 80));
+
+    const body = {};
+    if (usingImage) {
+      if (imageUrl)  body.image_url  = imageUrl;
+      if (imageData) body.image_data = imageData;
+      if (prompt)    body.prompt     = prompt;   // optional hint
+    } else {
+      body.prompt = prompt;
+    }
+
+    const logLabel = usingImage
+      ? `Meshy image-to-3D${prompt ? ` (hint: "${prompt.slice(0,40)}")` : ''}`
+      : `Meshy generating: "${prompt.slice(0,60)}"`;
+    console.log('[Jarvis] Meshy generate', usingImage ? '(image)' : '(text)', body);
+
     try {
-      const r = await fetch(url, {
+      const r = await fetch(`${this._apiUrl}/api/meshy/generate`, {
         method: 'POST', headers: this._apiHeaders,
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify(body),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
       this._meshyTask   = data.task_id;
+      this._meshyMode   = data.mode ?? (usingImage ? 'image' : 'text');
       this._meshyStatus = 'generating';
-      this._addLog('meshy', `Meshy generating: "${prompt}"`);
+      this._addLog('meshy', logLabel);
       this._meshyPollTimer = setInterval(() => this._pollMeshyTask(), 4000);
     } catch (e) {
       console.error('[Jarvis] Meshy generate error:', e);
@@ -555,7 +593,7 @@ class JarvisDashboard extends LitElement {
   async _pollMeshyTask() {
     if (!this._meshyTask) return;
     try {
-      const r = await fetch(`${this._apiUrl}/api/meshy/status/${this._meshyTask}`, { headers: this._apiHeaders });
+      const r = await fetch(`${this._apiUrl}/api/meshy/status/${this._meshyTask}?mode=${this._meshyMode}`, { headers: this._apiHeaders });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error ?? `HTTP ${r.status}`);
       this._meshyProgress = d.progress ?? this._meshyProgress;
@@ -580,7 +618,7 @@ class JarvisDashboard extends LitElement {
     try {
       const r = await fetch(`${this._apiUrl}/api/meshy/save`, {
         method: 'POST', headers: this._apiHeaders,
-        body: JSON.stringify({ task_id: this._meshyTask, project_id: this._activeProject?.id }),
+        body: JSON.stringify({ task_id: this._meshyTask, project_id: this._activeProject?.id, mode: this._meshyMode }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
@@ -656,9 +694,15 @@ class JarvisDashboard extends LitElement {
     const busy    = ['pending','generating','saving'].includes(this._meshyStatus);
     const done    = this._meshyStatus === 'done';
     const isError = this._meshyStatus === 'error';
+    const isText  = this._meshyTab === 'text';
+    const isImage = this._meshyTab === 'image';
+    const canGenerate = isText
+      ? !!this._meshyPrompt.trim()
+      : !!(this._meshyImageUrl.trim() || this._meshyImageData);
+
     const statusLabel = {
       idle:       '',
-      pending:    'Starting job…',
+      pending:    'Starting…',
       generating: `Generating… ${this._meshyProgress}%`,
       saving:     'Saving model…',
       done:       '✅ Done! Model loaded in 3D viewer.',
@@ -666,31 +710,76 @@ class JarvisDashboard extends LitElement {
     }[this._meshyStatus];
 
     return html`
+      <input type="file" id="meshy-img-fu" accept="image/*" style="display:none"
+             @change=${this._onMeshyImageFile}>
       <div class="modal-overlay" @click=${e=>{ if(e.target===e.currentTarget && !busy) this._closeMeshyModal(); }}>
-        <div class="modal">
-          <div class="modal-title">⚡ Generate 3D Model</div>
-          <div class="modal-subtitle">Powered by Meshy.AI · ~5 credits preview</div>
-          ${this._meshyThumb ? html`<img src=${this._meshyThumb} style="width:100%;border-radius:6px;margin:8px 0">` : nothing}
-          <div class="modal-row" style="flex-direction:column;align-items:stretch;gap:6px">
+        <div class="modal" style="width:320px">
+          <div class="modal-title">⚡ Meshy.AI — 3D Generate</div>
+
+          <!-- Mode tabs -->
+          <div style="display:flex;gap:4px;background:#0a1520;border-radius:6px;padding:3px">
+            <button style="flex:1;padding:5px;border-radius:4px;border:none;cursor:pointer;font-size:.72rem;font-weight:700;
+              background:${isText?'var(--accent)':'transparent'};color:${isText?'#000':'var(--text-dim)'}"
+              @click=${()=>{ if(!busy) this._meshyTab='text'; }}>✏ Describe</button>
+            <button style="flex:1;padding:5px;border-radius:4px;border:none;cursor:pointer;font-size:.72rem;font-weight:700;
+              background:${isImage?'var(--accent)':'transparent'};color:${isImage?'#000':'var(--text-dim)'}"
+              @click=${()=>{ if(!busy) this._meshyTab='image'; }}>📷 Image Ref</button>
+          </div>
+
+          ${isText ? html`
+            <!-- Text-to-3D tab -->
+            <div style="font-size:.68rem;color:var(--text-dim);margin:-4px 0 2px">
+              Describe exactly what you want. Your words go straight to Meshy — no AI rewriting.
+            </div>
             <textarea
-              style="width:100%;min-height:72px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:8px;font-size:13px"
-              placeholder="Describe the model… e.g. 'a wall-mount bracket for a Raspberry Pi 4'"
+              style="width:100%;min-height:80px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:8px;font-size:.8rem;font-family:inherit"
+              placeholder="e.g. compact phone stand, angled cradle, two splayed tapered legs, shallow circular recess on back, mid-century modern silhouette"
               .value=${this._meshyPrompt}
               @input=${e=>this._meshyPrompt=e.target.value}
               ?disabled=${busy}></textarea>
-          </div>
-          ${statusLabel ? html`<div class="modal-subtitle" style="color:${isError?'#e05':done?'#0d6':'#8cf'}">${statusLabel}</div>` : nothing}
+          ` : html`
+            <!-- Image-to-3D tab -->
+            <div style="font-size:.68rem;color:var(--text-dim);margin:-4px 0 2px">
+              Meshy generates geometry from a reference photo. Clean product shots work best.
+            </div>
+            ${this._meshyImagePreview ? html`
+              <img src=${this._meshyImagePreview} style="width:100%;max-height:120px;object-fit:contain;border-radius:4px;background:#0a0d14;margin:2px 0">
+            ` : nothing}
+            <div style="display:flex;gap:5px">
+              <input type="text"
+                style="flex:1;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:6px 8px;font-size:.78rem"
+                placeholder="Paste image URL…"
+                .value=${this._meshyImageUrl}
+                @input=${e=>{ this._meshyImageUrl=e.target.value; this._meshyImageData=null; this._meshyImagePreview=e.target.value||null; }}
+                ?disabled=${busy}>
+              <button style="background:#1a3a4a;border:1px solid #1a3a4a;border-radius:4px;color:var(--text-dim);cursor:pointer;padding:0 10px;font-size:.75rem;white-space:nowrap"
+                ?disabled=${busy}
+                @click=${()=>this.shadowRoot.querySelector('#meshy-img-fu').click()}>
+                📁 Upload
+              </button>
+            </div>
+            <textarea
+              style="width:100%;min-height:44px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:6px 8px;font-size:.75rem;font-family:inherit"
+              placeholder="Optional prompt hint (e.g. 'phone stand')…"
+              .value=${this._meshyPrompt}
+              @input=${e=>this._meshyPrompt=e.target.value}
+              ?disabled=${busy}></textarea>
+          `}
+
+          ${this._meshyThumb ? html`<img src=${this._meshyThumb} style="width:100%;border-radius:6px;margin:2px 0">` : nothing}
+          ${statusLabel ? html`<div style="font-size:.72rem;color:${isError?'#e05':done?'#0d6':'#8cf'};text-align:center">${statusLabel}</div>` : nothing}
           ${busy ? html`
-            <div style="height:4px;background:#0a2030;border-radius:2px;overflow:hidden;margin:4px 0">
-              <div style="height:100%;width:${this._meshyProgress||10}%;background:#00aaff;transition:width 0.5s;border-radius:2px"></div>
+            <div style="height:4px;background:#0a2030;border-radius:2px;overflow:hidden">
+              <div style="height:100%;width:${this._meshyProgress||8}%;background:#00aaff;transition:width 0.5s;border-radius:2px"></div>
             </div>` : nothing}
+
           <div class="modal-btns">
             <button class="modal-btn-cancel" @click=${this._closeMeshyModal} ?disabled=${busy && !isError}>
               ${done||isError ? 'Close' : 'Cancel'}
             </button>
             ${!done ? html`
               <button class="modal-btn-save" @click=${this._startMeshyGenerate}
-                ?disabled=${busy || !this._meshyPrompt.trim() || !this._activeProject}>
+                ?disabled=${busy || !canGenerate || !this._activeProject}>
                 ${busy ? '⏳ Generating…' : '⚡ Generate'}
               </button>` : nothing}
           </div>
@@ -1368,16 +1457,8 @@ class JarvisDashboard extends LitElement {
       <div class="msg ${m.role} ${m.id==='_sending'?'sending':''}">
         <div class="msg-role">${isJarvis?'⬡ Jarvis':'▶ You'}</div>
         ${parts.map(p => {
-          if (p.type === 'meshy') return html`
-            <div class="code-block" style="border-color:#003a6b">
-              <div class="code-lang" style="background:#003a6b">⚡ Meshy.AI — 3D Generation</div>
-              ${isJarvis ? html`
-                <button class="gen-btn" style="background:#003a6b"
-                  ?disabled=${!hasProject || ['pending','generating','saving'].includes(this._meshyStatus)}
-                  @click=${() => { this._meshyPrompt=p.code; this._meshyModal=true; this._startMeshyGenerate(); }}>
-                  ${['pending','generating','saving'].includes(this._meshyStatus) ? '⏳ Generating…' : !hasProject ? '⚡ Select a project to generate' : '⚡ Re-generate'}
-                </button>` : nothing}
-            </div>`;
+          // meshy blocks from chat are no longer rendered as cards — generation is direct via ⚡ button
+          if (p.type === 'meshy') return html`<span style="white-space:pre-wrap;opacity:.5;font-size:.72rem">[meshy prompt — use ⚡ Generate button]</span>`;
           if (p.type === 'svg') {
             // Ensure root is <svg> for inline preview (Gemini sometimes uses <g> as root)
             const svgPreviewCode = p.code.trim().toLowerCase().startsWith('<svg')
