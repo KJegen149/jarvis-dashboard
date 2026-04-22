@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.29
+// Jarvis Hub Dashboard v0.30
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -71,6 +71,8 @@ class JarvisDashboard extends LitElement {
     _meshyThumb:      { state: true },
     _meshyError:      { state: true },
     _svgSaving:       { state: true },
+    _active3dFileId:  { state: true },
+    _activeSvgFileId: { state: true },
   };
 
   constructor() {
@@ -110,6 +112,8 @@ class JarvisDashboard extends LitElement {
     this._meshyError     = null;
     this._meshyPollTimer = null;
     this._svgSaving      = false;
+    this._active3dFileId  = null;
+    this._activeSvgFileId = null;
     this._logOpen        = false;
   }
 
@@ -178,19 +182,27 @@ class JarvisDashboard extends LitElement {
     this._activeView = p.type === '3d_model' ? '3d' : p.type === 'svg' ? 'svg' : 'workspace';
     this._messages = [];
     this._files = [];
+    this._active3dFileId  = null;
+    this._activeSvgFileId = null;
     this._disposeThree();
     if (this._svgUrl) { URL.revokeObjectURL(this._svgUrl); this._svgUrl = null; }
     await Promise.all([this._loadMessages(p.id), this._loadFiles(p.id)]);
+    // Pick latest iteration as default (sorted oldest→newest, pick last)
+    const files3d  = this._3dFilesSorted;
+    const filesSvg = this._svgFilesSorted;
+    this._active3dFileId  = files3d.at(-1)?.id  ?? null;
+    this._activeSvgFileId = filesSvg.at(-1)?.id ?? null;
     if (this._activeView === '3d') {
       await this.updateComplete;
       this._initThree();
-      const glb = this._files.find(f => f.file_type === 'glb');
-      const stl = this._files.find(f => f.file_type === 'stl');
-      if (glb) await this._loadGLB(glb.id);
-      else if (stl) await this._loadSTL(stl.id);
+      const active3d = files3d.at(-1);
+      if (active3d) {
+        if (active3d.file_type === 'glb') await this._loadGLB(active3d.id);
+        else await this._loadSTL(active3d.id);
+      }
     } else if (this._activeView === 'svg') {
-      const svg = this._files.find(f => f.file_type === 'svg');
-      if (svg) await this._loadSVGFile(svg.id);
+      const activeSvg = filesSvg.at(-1);
+      if (activeSvg) await this._loadSVGFile(activeSvg.id);
     }
   }
 
@@ -249,12 +261,14 @@ class JarvisDashboard extends LitElement {
       if (r.ok) {
         const saved = await r.json();
         this._files = [saved, ...this._files];
-        if (fileType === 'stl') {
+        if (fileType === 'stl' || fileType === '3mf') {
+          this._active3dFileId = saved.id;
           this._activeView = '3d';
           await this.updateComplete;
           this._disposeThree(); this._initThree();
           await this._loadSTL(saved.id);
-        } else {
+        } else if (fileType === 'svg') {
+          this._activeSvgFileId = saved.id;
           this._activeView = 'svg';
           await this._loadSVGFile(saved.id);
         }
@@ -299,8 +313,11 @@ class JarvisDashboard extends LitElement {
           this._meshyModal  = true;
           this._startMeshyGenerate();
         }
-        // Auto-save SVG if Jarvis responded with an svg block
-        const svgMatch = d.response?.match(/```svg[^\n]*\n([\s\S]*?)```/i);
+        // Auto-save SVG if Jarvis responded with an svg (or xml) block containing SVG markup
+        const _svgDirect = d.response?.match(/```svg[^\n]*\n([\s\S]*?)```/i);
+        const _svgXml    = d.response?.match(/```xml[^\n]*\n([\s\S]*?)```/i);
+        // Accept ```xml only if the content actually starts with <svg
+        const svgMatch = _svgDirect ?? (_svgXml?.[1]?.trim().toLowerCase().startsWith('<svg') ? _svgXml : null);
         if (svgMatch && this._activeProject) {
           await this._saveSVGFromChat(svgMatch[1].trim());
         }
@@ -568,6 +585,7 @@ class JarvisDashboard extends LitElement {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
       this._files = [data, ...this._files];
+      this._active3dFileId = data.id;
       this._meshyStatus = 'done';
       this._addLog('meshy', `✅ Meshy model saved: ${data.filename}`);
       // Switch to 3D view and load the GLB
@@ -777,19 +795,58 @@ class JarvisDashboard extends LitElement {
     }
   }
 
+  // ── Iteration navigation ──────────────────────────────────────────────────
+
+  // Files sorted oldest→newest so prev/next feel natural
+  get _3dFilesSorted() {
+    return this._files.filter(f => ['stl','glb','3mf'].includes(f.file_type))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  }
+  get _svgFilesSorted() {
+    return this._files.filter(f => f.file_type === 'svg')
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  }
+
+  async _nav3d(dir) {
+    const files = this._3dFilesSorted;
+    const idx = files.findIndex(f => f.id === this._active3dFileId);
+    const safeIdx = idx >= 0 ? idx : files.length - 1;
+    const next = safeIdx + dir;
+    if (next < 0 || next >= files.length) return;
+    const f = files[next];
+    this._active3dFileId = f.id;
+    if (f.file_type === 'glb') await this._loadGLB(f.id);
+    else await this._loadSTL(f.id);
+  }
+
+  async _navSvg(dir) {
+    const files = this._svgFilesSorted;
+    const idx = files.findIndex(f => f.id === this._activeSvgFileId);
+    const safeIdx = idx >= 0 ? idx : files.length - 1;
+    const next = safeIdx + dir;
+    if (next < 0 || next >= files.length) return;
+    const f = files[next];
+    this._activeSvgFileId = f.id;
+    await this._loadSVGFile(f.id);
+  }
+
   // ── OpenSCAD generation ───────────────────────────────────────────────────
 
   _parseContent(text) {
     const parts = [];
     // [^\n]* allows anything after language tag (comments, extra text) before newline
     // \n? makes the newline optional (handles no-newline edge case)
-    const re = /```(openscad|scad|meshy|svg)[^\n]*\n?([\s\S]*?)```/gi;
+    // xml is included to catch cases where Gemini uses ```xml for SVG content
+    const re = /```(openscad|scad|meshy|svg|xml)[^\n]*\n?([\s\S]*?)```/gi;
     let last = 0, m;
     while ((m = re.exec(text)) !== null) {
       if (m.index > last) parts.push({ type: 'text', text: text.slice(last, m.index) });
       const lang = m[1].toLowerCase();
-      const type = lang === 'meshy' ? 'meshy' : lang === 'svg' ? 'svg' : 'code';
-      parts.push({ type, lang, code: m[2].trim() });
+      const code = m[2].trim();
+      // Treat ```xml as svg if the content starts with <svg (Gemini sometimes uses wrong tag)
+      const isSvgXml = lang === 'xml' && code.toLowerCase().startsWith('<svg');
+      const type = lang === 'meshy' ? 'meshy' : (lang === 'svg' || isSvgXml) ? 'svg' : 'code';
+      parts.push({ type, lang, code });
       last = re.lastIndex;
     }
     if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
@@ -976,6 +1033,7 @@ class JarvisDashboard extends LitElement {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const saved = await r.json();
       this._files = [saved, ...this._files];
+      this._activeSvgFileId = saved.id;
       this._addLog('svg', `SVG saved: ${filename}`);
       // Show in SVG viewer immediately using the local blob — no round-trip needed
       if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
@@ -1104,9 +1162,25 @@ class JarvisDashboard extends LitElement {
     .ws-idle p { font-size: .8rem; color: var(--text-dim); opacity: .6; }
     .ws-canvas-wrap { position: absolute; inset: 0; }
     #three-canvas   { width: 100%; height: 100%; display: block; }
-    .svg-viewer { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--bg); }
+    .svg-viewer { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--bg); padding-bottom: 38px; }
     .svg-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
     .ws-hint { color: var(--text-dim); font-size: .82rem; text-align: center; line-height: 1.8; }
+
+    /* ── Iteration navigation bar ── */
+    .iter-nav {
+      position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
+      display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+      background: rgba(0,0,0,.65); backdrop-filter: blur(4px);
+      border-top: 1px solid var(--border);
+    }
+    .iter-nav .in-arrow {
+      background: none; border: 1px solid var(--border); border-radius: 4px;
+      color: var(--text-dim); cursor: pointer; font-size: .75rem; padding: 2px 7px; transition: all .15s;
+    }
+    .iter-nav .in-arrow:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .iter-nav .in-arrow:disabled { opacity: .3; cursor: not-allowed; }
+    .iter-nav .in-pos  { font-size: .7rem; color: var(--accent); font-weight: 700; min-width: 40px; text-align: center; flex-shrink: 0; }
+    .iter-nav .in-name { flex: 1; font-size: .68rem; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .view-tabs {
       position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
       display: flex; gap: 3px; background: rgba(0,0,0,.5); backdrop-filter: blur(4px);
@@ -1503,9 +1577,32 @@ class JarvisDashboard extends LitElement {
     </div>`;
     let body;
     if (this._activeView === '3d') {
-      body = html`<div class="ws-canvas-wrap"><canvas id="three-canvas"></canvas></div>`;
+      const files3d = this._3dFilesSorted;
+      const idx3d   = files3d.findIndex(f => f.id === this._active3dFileId);
+      const safeIdx = idx3d >= 0 ? idx3d : files3d.length - 1;
+      const nav3d = files3d.length > 1 ? html`
+        <div class="iter-nav">
+          <button class="in-arrow" ?disabled=${safeIdx <= 0} @click=${()=>this._nav3d(-1)}>◀</button>
+          <span class="in-pos">Iter ${safeIdx+1}/${files3d.length}</span>
+          <button class="in-arrow" ?disabled=${safeIdx >= files3d.length-1} @click=${()=>this._nav3d(1)}>▶</button>
+          <span class="in-name">${files3d[safeIdx]?.filename??''}</span>
+        </div>` : nothing;
+      body = html`<div class="ws-canvas-wrap"><canvas id="three-canvas"></canvas>${nav3d}</div>`;
     } else if (this._activeView === 'svg') {
-      body = html`<div class="svg-viewer">${this._svgUrl?html`<img src=${this._svgUrl} alt="SVG preview">`:html`<p class="ws-hint">No SVG uploaded yet.<br>Use ⬆ Upload to add one.</p>`}</div>`;
+      const filesSvg = this._svgFilesSorted;
+      const idxSvg   = filesSvg.findIndex(f => f.id === this._activeSvgFileId);
+      const safeIdxS = idxSvg >= 0 ? idxSvg : filesSvg.length - 1;
+      const navSvg = filesSvg.length > 1 ? html`
+        <div class="iter-nav">
+          <button class="in-arrow" ?disabled=${safeIdxS <= 0} @click=${()=>this._navSvg(-1)}>◀</button>
+          <span class="in-pos">Iter ${safeIdxS+1}/${filesSvg.length}</span>
+          <button class="in-arrow" ?disabled=${safeIdxS >= filesSvg.length-1} @click=${()=>this._navSvg(1)}>▶</button>
+          <span class="in-name">${filesSvg[safeIdxS]?.filename??''}</span>
+        </div>` : nothing;
+      body = html`<div class="svg-viewer">
+        ${this._svgUrl?html`<img src=${this._svgUrl} alt="SVG preview">`:html`<p class="ws-hint">No SVG uploaded yet.<br>Use ⬆ Upload to add one.</p>`}
+        ${navSvg}
+      </div>`;
     } else {
       body = html`<div class="ws-project-info"><h2>${this._activeProject.name}</h2><p>${this._activeProject.description??'No description'}</p><span class="badge">${TYPE_LABELS[this._activeProject.type]??this._activeProject.type}</span></div>`;
     }
