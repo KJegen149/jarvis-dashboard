@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.30
+// Jarvis Hub Dashboard v0.31
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -315,6 +315,21 @@ class JarvisDashboard extends LitElement {
           ];
         }
         if (d.search_results?.length) this._startSearchSession(d.search_results, d.search_query ?? '');
+        // Handle Jarvis project actions
+        if (d.new_project) {
+          this._projects = [d.new_project, ...this._projects];
+          await this._selectProject(d.new_project);
+          this._addLog('sys', `Project created: "${d.new_project.name}"`);
+        }
+        if (d.deleted_project_id) {
+          this._projects = this._projects.filter(p => p.id !== d.deleted_project_id);
+          if (this._activeProject?.id === d.deleted_project_id) {
+            this._activeProject = null; this._messages = []; this._files = [];
+            this._disposeThree();
+            if (this._svgUrl) { URL.revokeObjectURL(this._svgUrl); this._svgUrl = null; }
+          }
+          this._addLog('sys', 'Project deleted');
+        }
         // Auto-save SVG if Jarvis responded with an svg (or xml) block containing SVG markup
         const _svgDirect = d.response?.match(/```svg[^\n]*\n([\s\S]*?)(?:```|$)/i);
         const _svgXml    = d.response?.match(/```xml[^\n]*\n([\s\S]*?)(?:```|$)/i);
@@ -509,14 +524,15 @@ class JarvisDashboard extends LitElement {
 
   // ── Meshy.AI text-to-3D ──────────────────────────────────────────────────
 
-  _openMeshyModal() {
+  _openMeshyModal(tab = null) {
     this._meshyModal    = true;
     this._meshyStatus   = 'idle';
     this._meshyError    = null;
     this._meshyTask     = null;
     this._meshyProgress = 0;
     this._meshyThumb    = null;
-    this._meshyTab      = 'text';
+    // Only reset tab if not pre-set by caller (📷 Photo button sets it before calling)
+    if (tab) this._meshyTab = tab;
     this._meshyImageUrl = '';
     this._meshyImageData = null;
     this._meshyImagePreview = null;
@@ -1170,6 +1186,7 @@ class JarvisDashboard extends LitElement {
       --text-dim:   #4a5a70;
       --radius:     10px;
       --panel-w:    220px;
+      --panel-r-w:  168px;
       height: calc(100vh - var(--header-height, 56px));
       overflow: hidden;
       font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
@@ -1200,11 +1217,11 @@ class JarvisDashboard extends LitElement {
     .toggle-btn:hover { border-color: var(--accent); color: var(--accent); }
     .main { display: flex; flex: 1; overflow: hidden; min-height: 0; }
     .panel {
-      width: var(--panel-w); background: var(--surface); display: flex;
+      background: var(--surface); display: flex;
       flex-direction: column; flex-shrink: 0; transition: width .25s ease; overflow: hidden;
     }
-    .panel-left  { border-right: 1px solid var(--border); }
-    .panel-right { border-left:  1px solid var(--border); }
+    .panel-left  { width: var(--panel-w);   border-right: 1px solid var(--border); }
+    .panel-right { width: var(--panel-r-w); border-left:  1px solid var(--border); }
     .panel.closed { width: 32px; }
     .panel-head {
       display: flex; align-items: center; justify-content: space-between;
@@ -1224,8 +1241,8 @@ class JarvisDashboard extends LitElement {
     }
     .chat-msgs::-webkit-scrollbar { width: 3px; }
     .chat-msgs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    .msg { padding: 7px 9px; border-radius: 7px; font-size: 0.8rem; line-height: 1.5; }
-    .msg-role { font-size: 0.65rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; opacity: .6; }
+    .msg { padding: 7px 9px; border-radius: 7px; font-size: 0.8rem; line-height: 1.5; user-select: text; cursor: text; }
+    .msg-role { font-size: 0.65rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; opacity: .6; user-select: none; cursor: default; }
     .msg.user   { background:#0d2d40; border:1px solid #1a4a60; color:#8ecfef; }
     .msg.jarvis { background:#0a2010; border:1px solid #1a4020; color:#80d080; }
     .msg.sending { opacity: .5; }
@@ -1291,7 +1308,7 @@ class JarvisDashboard extends LitElement {
     .gallery-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 5px; min-height: 0; }
     .gallery-list::-webkit-scrollbar { width: 3px; }
     .gallery-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    .proj-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; transition: all .15s; }
+    .proj-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 6px 8px; transition: all .15s; }
     .proj-card:hover  { border-color: var(--accent); }
     .proj-card.active { border-color: var(--accent); background: rgba(0,245,255,.05); }
     .proj-card-inner  { display: flex; align-items: center; gap: 4px; }
@@ -1431,7 +1448,7 @@ class JarvisDashboard extends LitElement {
     @media (max-width: 680px) {
       .root { height: auto; min-height: 400px; }
       .main { flex-direction: column; }
-      .panel { width: 100% !important; max-height: 180px; }
+      .panel-left, .panel-right { width: 100% !important; max-height: 180px; }
       .panel-left  { border-right: none; border-bottom: 1px solid var(--border); }
       .panel-right { border-left:  none; border-top:    1px solid var(--border); }
       .panel.closed { width: 100% !important; max-height: 32px; }
@@ -1748,21 +1765,23 @@ class JarvisDashboard extends LitElement {
           <div class="panel panel-right ${this._rightOpen?'':'closed'}">
             <div class="panel-head">
               <span class="ph-icon">📁</span><span class="ph-label">Projects</span>
+              <button class="ph-label" style="font-size:1rem;font-weight:700;padding:0 4px" title="New project" @click=${this._newProject}>+</button>
               <button class="ph-label" @click=${()=>this._rightOpen=false}>✕</button>
             </div>
             <div class="panel-body">
               <div class="gallery-list">
-                ${this._projects.length?this._projects.map(p=>this._renderProjCard(p)):html`<div class="gallery-empty">No projects yet.<br>Create one below.</div>`}
+                ${this._projects.length?this._projects.map(p=>this._renderProjCard(p)):html`<div class="gallery-empty">Ask Jarvis<br>to start one!</div>`}
               </div>
-              <div class="gallery-foot"><button class="new-btn" @click=${this._newProject}>+ New Project</button></div>
             </div>
           </div>
         </div>
         <div class="actionbar">
           <button class="act" ?disabled=${!haProj} @click=${this._showPrintModal}>🖨 Print</button>
           <button class="act" ?disabled=${!haProj} @click=${this._openMeshyModal}>⚡ Generate</button>
+          <button class="act" ?disabled=${!haProj}
+            title="Generate 3D from a photo — works great with phone camera on mobile"
+            @click=${()=>{ if(!haProj) return; this._meshyTab='image'; this._openMeshyModal(); }}>📷 Photo</button>
           <button class="act" ?disabled=${!haProj}>✂ Cut</button>
-          <button class="act" ?disabled=${!haProj}>⬇ Export</button>
           <button class="act" ?disabled=${!haProj} @click=${()=>this.shadowRoot.querySelector('#fu').click()}>⬆ Upload</button>
           <button class="act" @click=${this._loadData}>↻ Refresh</button>
         </div>
