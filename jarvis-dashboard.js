@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.26
+// Jarvis Hub Dashboard v0.27
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -70,6 +70,7 @@ class JarvisDashboard extends LitElement {
     _meshyStatus:     { state: true },
     _meshyThumb:      { state: true },
     _meshyError:      { state: true },
+    _svgSaving:       { state: true },
   };
 
   constructor() {
@@ -108,6 +109,7 @@ class JarvisDashboard extends LitElement {
     this._meshyThumb     = null;
     this._meshyError     = null;
     this._meshyPollTimer = null;
+    this._svgSaving      = false;
     this._logOpen        = false;
   }
 
@@ -290,12 +292,17 @@ class JarvisDashboard extends LitElement {
         }
         if (d.search_results?.length) this._startSearchSession(d.search_results, d.search_query ?? '');
         // Auto-trigger Meshy if Jarvis responded with a meshy block
-        const meshyMatch = d.response?.match(/```meshy[ \t]*\n?([\s\S]*?)```/i);
+        const meshyMatch = d.response?.match(/```meshy[^\n]*\n?([\s\S]*?)```/i);
         if (meshyMatch && this._activeProject) {
           const prompt = meshyMatch[1].trim();
           this._meshyPrompt = prompt;
           this._meshyModal  = true;
           this._startMeshyGenerate();
+        }
+        // Auto-save SVG if Jarvis responded with an svg block
+        const svgMatch = d.response?.match(/```svg[^\n]*\n([\s\S]*?)```/i);
+        if (svgMatch && this._activeProject) {
+          await this._saveSVGFromChat(svgMatch[1].trim());
         }
         this._loadLog();
       }
@@ -776,12 +783,13 @@ class JarvisDashboard extends LitElement {
     const parts = [];
     // [^\n]* allows anything after language tag (comments, extra text) before newline
     // \n? makes the newline optional (handles no-newline edge case)
-    const re = /```(openscad|scad|meshy)[^\n]*\n?([\s\S]*?)```/gi;
+    const re = /```(openscad|scad|meshy|svg)[^\n]*\n?([\s\S]*?)```/gi;
     let last = 0, m;
     while ((m = re.exec(text)) !== null) {
       if (m.index > last) parts.push({ type: 'text', text: text.slice(last, m.index) });
       const lang = m[1].toLowerCase();
-      parts.push({ type: lang === 'meshy' ? 'meshy' : 'code', lang, code: m[2].trim() });
+      const type = lang === 'meshy' ? 'meshy' : lang === 'svg' ? 'svg' : 'code';
+      parts.push({ type, lang, code: m[2].trim() });
       last = re.lastIndex;
     }
     if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
@@ -952,6 +960,32 @@ class JarvisDashboard extends LitElement {
       if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
       this._svgUrl = URL.createObjectURL(blob);
     } catch (_) {}
+  }
+
+  async _saveSVGFromChat(svgCode) {
+    if (!this._activeProject || !svgCode) return;
+    this._svgSaving = true;
+    try {
+      const blob     = new Blob([svgCode], { type: 'image/svg+xml' });
+      const filename = `${this._activeProject.name.replace(/\s+/g,'_')}_${Date.now()}.svg`;
+      const r = await fetch(`${this._apiUrl}/api/projects/${this._activeProject.id}/files`, {
+        method: 'POST',
+        headers: { 'X-API-Key': this._config?.api_key ?? '', 'X-File-Name': filename, 'X-File-Type': 'svg' },
+        body: blob,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const saved = await r.json();
+      this._files = [saved, ...this._files];
+      this._addLog('svg', `SVG saved: ${filename}`);
+      // Show in SVG viewer immediately using the local blob — no round-trip needed
+      if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
+      this._svgUrl = URL.createObjectURL(blob);
+      this._activeView = 'svg';
+    } catch (e) {
+      this._addLog('error', `SVG save failed: ${e.message}`);
+      console.error('[Jarvis] SVG save failed:', e);
+    }
+    this._svgSaving = false;
   }
 
   updated(changed) {
@@ -1264,6 +1298,21 @@ class JarvisDashboard extends LitElement {
                   ${['pending','generating','saving'].includes(this._meshyStatus) ? '⏳ Generating…' : !hasProject ? '⚡ Generating — select a project first' : '⚡ Generate with Meshy'}
                 </button>` : nothing}
             </div>`;
+          if (p.type === 'svg') return html`
+            <div class="code-block" style="border-color:#1a4a2a">
+              <div class="code-lang" style="background:#1a4a2a">✂ SVG — Cricut Design</div>
+              <div style="padding:8px;background:#fff;text-align:center;line-height:0">
+                <img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(p.code)}"
+                     style="max-width:100%;max-height:140px;object-fit:contain"
+                     alt="SVG preview">
+              </div>
+              ${isJarvis ? html`
+                <button class="gen-btn" style="background:#1a4a2a"
+                  ?disabled=${!hasProject || this._svgSaving}
+                  @click=${() => this._saveSVGFromChat(p.code)}>
+                  ${this._svgSaving ? '⏳ Saving…' : !hasProject ? '✂ Save SVG — select a project first' : '✂ Save to Project & Preview'}
+                </button>` : nothing}
+            </div>`;
           if (p.type === 'code') return html`
             <div class="code-block">
               <div class="code-lang">OpenSCAD</div>
@@ -1450,8 +1499,8 @@ class JarvisDashboard extends LitElement {
     if (!this._activeProject) return html`<div class="ws-idle"><div class="watermark">Jarvis</div><p>Select or create a project</p></div>`;
     const tabs = html`<div class="view-tabs">
       <button class="vt ${this._activeView==='workspace'?'on':''}" @click=${()=>this._activeView='workspace'}>Info</button>
-      ${this._activeProject.type==='3d_model'?html`<button class="vt ${this._activeView==='3d'?'on':''}" @click=${()=>this._activeView='3d'}>3D</button>`:nothing}
-      ${this._activeProject.type==='svg'?html`<button class="vt ${this._activeView==='svg'?'on':''}" @click=${()=>this._activeView='svg'}>SVG</button>`:nothing}
+      ${(this._activeProject.type==='3d_model'||this._files.some(f=>['stl','glb','3mf'].includes(f.file_type)))?html`<button class="vt ${this._activeView==='3d'?'on':''}" @click=${()=>this._activeView='3d'}>3D</button>`:nothing}
+      ${(this._activeProject.type==='svg'||this._files.some(f=>f.file_type==='svg'))?html`<button class="vt ${this._activeView==='svg'?'on':''}" @click=${()=>this._activeView='svg'}>SVG</button>`:nothing}
     </div>`;
     let body;
     if (this._activeView === '3d') {
