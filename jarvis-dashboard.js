@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.31
+// Jarvis Hub Dashboard v0.32
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -1185,8 +1185,8 @@ class JarvisDashboard extends LitElement {
       --text:       #d0d8e8;
       --text-dim:   #4a5a70;
       --radius:     10px;
-      --panel-w:    220px;
-      --panel-r-w:  168px;
+      --panel-w:    250px;
+      --panel-r-w:  160px;
       height: calc(100vh - var(--header-height, 56px));
       overflow: hidden;
       font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
@@ -1246,19 +1246,42 @@ class JarvisDashboard extends LitElement {
     .msg.user   { background:#0d2d40; border:1px solid #1a4a60; color:#8ecfef; }
     .msg.jarvis { background:#0a2010; border:1px solid #1a4020; color:#80d080; }
     .msg.sending { opacity: .5; }
-    .chat-footer { padding: 7px; border-top: 1px solid var(--border); display: flex; gap: 5px; flex-shrink: 0; }
+    /* ── Chat footer: textarea full-width, send overlaid, actions below ── */
+    .chat-footer {
+      padding: 6px 8px 5px; border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 4px; flex-shrink: 0;
+    }
+    .chat-input-wrap { position: relative; }
     .chat-footer textarea {
-      flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
-      color: var(--text); font-family: inherit; font-size: 0.8rem; padding: 5px 7px; resize: none; height: 52px;
+      display: block; width: 100%; box-sizing: border-box;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); font-family: inherit; font-size: 0.8rem;
+      padding: 6px 36px 6px 8px;   /* right pad keeps text clear of send btn */
+      resize: none; height: 66px;
     }
     .chat-footer textarea:focus { outline: none; border-color: var(--accent); }
     .chat-footer textarea:disabled { opacity: .5; }
     .send-btn {
-      background: var(--accent); border: none; border-radius: 6px; color: #000;
-      cursor: pointer; font-size: 1rem; font-weight: 700; padding: 0 10px; transition: opacity .15s;
+      position: absolute; bottom: 6px; right: 6px;
+      width: 26px; height: 26px;
+      background: var(--accent); border: none; border-radius: 6px;
+      color: #000; cursor: pointer; font-size: .75rem; font-weight: 900;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity .15s; flex-shrink: 0;
     }
-    .send-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .send-btn:disabled { opacity: .25; cursor: not-allowed; }
     .send-btn:hover:not(:disabled) { opacity: .8; }
+    /* ── Row of small action pills under the textarea ── */
+    .chat-actions { display: flex; gap: 4px; }
+    .chat-act-btn {
+      flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+      color: var(--text-dim); cursor: pointer; font-size: .68rem; padding: 3px 4px;
+      display: flex; align-items: center; justify-content: center; gap: 3px;
+      transition: all .15s; white-space: nowrap; min-width: 0; overflow: hidden;
+    }
+    .chat-act-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .chat-act-btn:disabled { opacity: .35; cursor: not-allowed; }
+    .chat-act-btn.recording { border-color: #ff5555; color: #ff5555; animation: mic-pulse 1s ease-in-out infinite; }
     .workspace {
       flex: 1; display: flex; align-items: center; justify-content: center;
       padding: 14px; overflow: hidden; min-height: 0;
@@ -1429,19 +1452,10 @@ class JarvisDashboard extends LitElement {
     .search-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
     .search-error p { font-size: .78rem; color: #ff6b6b; }
 
-    /* ── Mic button ── */
-    .mic-btn {
-      background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
-      color: var(--text-dim); cursor: pointer; font-size: 1rem; padding: 0 8px;
-      transition: all .15s; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .mic-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    .mic-btn:disabled { opacity: .4; cursor: not-allowed; }
-    .mic-btn.active { border-color: #ff5555; color: #ff5555; animation: mic-pulse 1s ease-in-out infinite; }
-    @keyframes mic-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,85,85,.4)} 50%{box-shadow:0 0 0 5px rgba(255,85,85,0)} }
+    @keyframes mic-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,85,85,.4)} 50%{box-shadow:0 0 0 4px rgba(255,85,85,0)} }
     .mic-spin {
-      display: inline-block; width: 12px; height: 12px;
-      border: 2px solid var(--border); border-top-color: var(--accent);
+      display: inline-block; width: 10px; height: 10px; flex-shrink: 0;
+      border: 2px solid rgba(255,255,255,.2); border-top-color: var(--accent);
       border-radius: 50%; animation: spin .8s linear infinite;
     }
 
@@ -1749,15 +1763,29 @@ class JarvisDashboard extends LitElement {
                 ${this._sending?html`<div class="msg jarvis sending"><div class="msg-role">⬡ Jarvis</div>…</div>`:nothing}
               </div>
               <div class="chat-footer">
-                <textarea .value=${this._chatInput} @input=${e=>this._chatInput=e.target.value}
-                  @keydown=${this._onChatKey} ?disabled=${this._sending} placeholder="Ask Jarvis…"></textarea>
-                <button class="mic-btn ${this._recording?'active':''}"
-                  title=${this._recording?'Stop recording':'Hold to speak'}
-                  ?disabled=${this._transcribing||this._sending}
-                  @click=${this._toggleMic}>
-                  ${this._transcribing ? html`<span class="mic-spin"></span>` : this._recording ? '⏹' : '🎙'}
-                </button>
-                <button class="send-btn" ?disabled=${this._sending} @click=${this._sendChat}>▶</button>
+                <div class="chat-input-wrap">
+                  <textarea .value=${this._chatInput} @input=${e=>this._chatInput=e.target.value}
+                    @keydown=${this._onChatKey} ?disabled=${this._sending}
+                    placeholder="Ask Jarvis…"></textarea>
+                  <button class="send-btn" ?disabled=${this._sending} @click=${this._sendChat}>
+                    ${this._sending ? html`<span class="mic-spin" style="border-top-color:#000"></span>` : '▶'}
+                  </button>
+                </div>
+                <div class="chat-actions">
+                  <button class="chat-act-btn ${this._recording?'recording':''}"
+                    ?disabled=${this._transcribing||this._sending}
+                    @click=${this._toggleMic}>
+                    ${this._transcribing
+                      ? html`<span class="mic-spin"></span> Listening…`
+                      : this._recording ? '⏹ Stop' : '🎙 Mic'}
+                  </button>
+                  <button class="chat-act-btn"
+                    ?disabled=${!this._activeProject}
+                    title="Generate 3D from photo — opens camera on mobile"
+                    @click=${()=>{ this._meshyTab='image'; this._openMeshyModal(); }}>
+                    📷 Photo→3D
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1778,9 +1806,6 @@ class JarvisDashboard extends LitElement {
         <div class="actionbar">
           <button class="act" ?disabled=${!haProj} @click=${this._showPrintModal}>🖨 Print</button>
           <button class="act" ?disabled=${!haProj} @click=${this._openMeshyModal}>⚡ Generate</button>
-          <button class="act" ?disabled=${!haProj}
-            title="Generate 3D from a photo — works great with phone camera on mobile"
-            @click=${()=>{ if(!haProj) return; this._meshyTab='image'; this._openMeshyModal(); }}>📷 Photo</button>
           <button class="act" ?disabled=${!haProj}>✂ Cut</button>
           <button class="act" ?disabled=${!haProj} @click=${()=>this.shadowRoot.querySelector('#fu').click()}>⬆ Upload</button>
           <button class="act" @click=${this._loadData}>↻ Refresh</button>
