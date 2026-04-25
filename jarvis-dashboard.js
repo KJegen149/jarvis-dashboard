@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.33
+// Jarvis Hub Dashboard v0.34
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -1189,13 +1189,10 @@ class JarvisDashboard extends LitElement {
   }
 
   async _loadSVGFile(fileId) {
-    try {
-      const r = await fetch(`${this._apiUrl}/api/files/${fileId}`, { headers:{'X-API-Key':this._config?.api_key??''} });
-      if (!r.ok) return;
-      const blob = await r.blob();
-      if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
-      this._svgUrl = URL.createObjectURL(blob);
-    } catch (_) {}
+    // Use a direct img-src URL instead of fetch() to avoid HA's connect-src CSP restriction.
+    // The ?key= query param is supported by the worker's authCheck().
+    if (this._svgUrl?.startsWith('blob:')) URL.revokeObjectURL(this._svgUrl);
+    this._svgUrl = `${this._apiUrl}/api/files/${fileId}?key=${encodeURIComponent(this._config?.api_key ?? '')}`;
   }
 
   async _saveSVGFromChat(svgCode) {
