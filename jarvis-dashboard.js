@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.32
+// Jarvis Hub Dashboard v0.33
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -72,9 +72,9 @@ class JarvisDashboard extends LitElement {
     _meshyError:      { state: true },
     _meshyTab:        { state: true },   // 'text' | 'image'
     _meshyMode:       { state: true },   // 'text' | 'image' — set at generate time, used for poll/save
-    _meshyImageUrl:   { state: true },
-    _meshyImageData:  { state: true },   // base64 string (from file upload)
-    _meshyImagePreview: { state: true }, // data URL for preview
+    _meshyImageUrl:   { state: true },   // pasted URL input
+    _meshyImages:     { state: true },   // [{preview, r2Url, uploading, error, name}] — uploaded files
+    _meshyActiveImg:  { state: true },   // index of selected image in _meshyImages
     _svgSaving:       { state: true },
     _active3dFileId:  { state: true },
     _activeSvgFileId: { state: true },
@@ -115,11 +115,11 @@ class JarvisDashboard extends LitElement {
     this._meshyStatus    = 'idle';   // idle | pending | generating | saving | done | error
     this._meshyThumb     = null;
     this._meshyError     = null;
-    this._meshyTab      = 'text';    // 'text' | 'image'
-    this._meshyMode     = 'text';    // actual mode sent to API (set at generate time)
-    this._meshyImageUrl   = '';
-    this._meshyImageData  = null;    // base64 from file upload
-    this._meshyImagePreview = null;  // data URL for preview
+    this._meshyTab       = 'text';   // 'text' | 'image'
+    this._meshyMode      = 'text';   // actual mode sent to API (set at generate time)
+    this._meshyImageUrl  = '';       // pasted URL
+    this._meshyImages    = [];       // [{preview, r2Url, uploading, error, name}]
+    this._meshyActiveImg = 0;
     this._meshyPollTimer = null;
     this._svgSaving      = false;
     this._active3dFileId  = null;
@@ -533,9 +533,9 @@ class JarvisDashboard extends LitElement {
     this._meshyThumb    = null;
     // Only reset tab if not pre-set by caller (📷 Photo button sets it before calling)
     if (tab) this._meshyTab = tab;
-    this._meshyImageUrl = '';
-    this._meshyImageData = null;
-    this._meshyImagePreview = null;
+    this._meshyImageUrl  = '';
+    this._meshyImages    = [];
+    this._meshyActiveImg = 0;
   }
 
   _closeMeshyModal() {
@@ -545,26 +545,70 @@ class JarvisDashboard extends LitElement {
   }
 
   async _onMeshyImageFile(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const dataUrl = ev.target.result;
-      // Strip data URL prefix to get raw base64 for Meshy API
-      this._meshyImageData    = dataUrl.split(',')[1] ?? dataUrl;
-      this._meshyImagePreview = dataUrl;
-      this._meshyImageUrl     = '';  // clear URL if file chosen
-    };
-    reader.readAsDataURL(file);
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
+    e.target.value = '';  // reset so same file can be re-added
+
+    // Build placeholder entries immediately so UI shows thumbnails right away
+    const newEntries = files.map(f => ({ name: f.name, preview: null, r2Url: null, uploading: true, error: null }));
+    const startIdx   = this._meshyImages.length;
+    this._meshyImages = [...this._meshyImages, ...newEntries];
+    this._meshyActiveImg = startIdx;  // select first of the new batch
+
+    // Load previews and upload in parallel
+    files.forEach(async (file, i) => {
+      const idx = startIdx + i;
+
+      // Generate preview data URL
+      const preview = await new Promise(res => {
+        const reader = new FileReader();
+        reader.onload = ev => res(ev.target.result);
+        reader.readAsDataURL(file);
+      });
+
+      // Update preview
+      this._meshyImages = this._meshyImages.map((img, j) => j === idx ? { ...img, preview } : img);
+
+      // Upload raw binary to Worker → R2 → public URL
+      try {
+        const buf = await file.arrayBuffer();
+        const r = await fetch(`${this._apiUrl}/api/meshy/upload-image`, {
+          method: 'POST',
+          headers: { 'X-API-Key': this._config?.api_key ?? '', 'Content-Type': file.type || 'image/jpeg' },
+          body: buf,
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+        this._meshyImages = this._meshyImages.map((img, j) =>
+          j === idx ? { ...img, r2Url: data.url, uploading: false } : img
+        );
+      } catch (err) {
+        this._meshyImages = this._meshyImages.map((img, j) =>
+          j === idx ? { ...img, uploading: false, error: err.message } : img
+        );
+      }
+    });
   }
 
   async _startMeshyGenerate() {
-    const prompt    = this._meshyPrompt.trim();
-    const imageUrl  = this._meshyImageUrl.trim();
-    const imageData = this._meshyImageData;
-    const usingImage = this._meshyTab === 'image' && (imageUrl || imageData);
+    const prompt     = this._meshyPrompt.trim();
+    const pastedUrl  = this._meshyImageUrl.trim();
+    // Pick the active uploaded image's R2 URL, or fall back to pasted URL
+    const activeImg  = this._meshyImages[this._meshyActiveImg];
+    const imageUrl   = activeImg?.r2Url || pastedUrl;
+    const usingImage = this._meshyTab === 'image' && !!imageUrl;
 
     if (!usingImage && !prompt) return;
+
+    // Check that uploaded image is done uploading
+    if (this._meshyTab === 'image' && activeImg?.uploading) {
+      this._meshyError = 'Image still uploading — please wait a moment';
+      return;
+    }
+    if (this._meshyTab === 'image' && activeImg?.error) {
+      this._meshyError = `Upload failed: ${activeImg.error}`;
+      return;
+    }
 
     if (this._meshyPollTimer) { clearInterval(this._meshyPollTimer); this._meshyPollTimer = null; }
     this._meshyStatus   = 'pending';
@@ -574,9 +618,8 @@ class JarvisDashboard extends LitElement {
 
     const body = {};
     if (usingImage) {
-      if (imageUrl)  body.image_url  = imageUrl;
-      if (imageData) body.image_data = imageData;
-      if (prompt)    body.prompt     = prompt;   // optional hint
+      body.image_url = imageUrl;
+      if (prompt) body.prompt = prompt;   // optional hint
     } else {
       body.prompt = prompt;
     }
@@ -712,9 +755,11 @@ class JarvisDashboard extends LitElement {
     const isError = this._meshyStatus === 'error';
     const isText  = this._meshyTab === 'text';
     const isImage = this._meshyTab === 'image';
+    const activeImg   = this._meshyImages[this._meshyActiveImg];
+    const hasImage    = !!(activeImg?.r2Url || this._meshyImageUrl.trim());
     const canGenerate = isText
       ? !!this._meshyPrompt.trim()
-      : !!(this._meshyImageUrl.trim() || this._meshyImageData);
+      : hasImage && !activeImg?.uploading && !activeImg?.error;
 
     const statusLabel = {
       idle:       '',
@@ -726,7 +771,7 @@ class JarvisDashboard extends LitElement {
     }[this._meshyStatus];
 
     return html`
-      <input type="file" id="meshy-img-fu" accept="image/*" style="display:none"
+      <input type="file" id="meshy-img-fu" accept="image/*" multiple style="display:none"
              @change=${this._onMeshyImageFile}>
       <div class="modal-overlay" @click=${e=>{ if(e.target===e.currentTarget && !busy) this._closeMeshyModal(); }}>
         <div class="modal" style="width:320px">
@@ -758,24 +803,52 @@ class JarvisDashboard extends LitElement {
             <div style="font-size:.68rem;color:var(--text-dim);margin:-4px 0 2px">
               Meshy generates geometry from a reference photo. Clean product shots work best.
             </div>
-            ${this._meshyImagePreview ? html`
-              <img src=${this._meshyImagePreview} style="width:100%;max-height:120px;object-fit:contain;border-radius:4px;background:#0a0d14;margin:2px 0">
+
+            <!-- Thumbnail grid of uploaded images -->
+            ${this._meshyImages.length ? html`
+              <div style="display:flex;flex-wrap:wrap;gap:5px;max-height:160px;overflow-y:auto;padding:2px 0">
+                ${this._meshyImages.map((img, i) => html`
+                  <div style="position:relative;width:72px;height:72px;border-radius:5px;overflow:hidden;
+                               border:2px solid ${i===this._meshyActiveImg ? 'var(--accent)' : '#1a3a4a'};
+                               cursor:pointer;flex-shrink:0;background:#0a0d14"
+                       @click=${()=>{ if(!busy) this._meshyActiveImg=i; }}>
+                    ${img.preview
+                      ? html`<img src=${img.preview} style="width:100%;height:100%;object-fit:cover">`
+                      : html`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.4rem">🖼</div>`}
+                    ${img.uploading ? html`
+                      <div style="position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font-size:.6rem;color:#8cf">⏳</div>
+                    ` : img.error ? html`
+                      <div style="position:absolute;inset:0;background:rgba(180,0,0,.5);display:flex;align-items:center;justify-content:center;font-size:.6rem;color:#fff" title=${img.error}>❌</div>
+                    ` : html`
+                      <div style="position:absolute;inset:0;background:rgba(0,0,0,.25);display:flex;align-items:end;justify-content:end;padding:2px">
+                        <span style="font-size:.48rem;color:rgba(255,255,255,.5);max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${img.name}</span>
+                      </div>
+                    `}
+                  </div>
+                `)}
+              </div>
             ` : nothing}
-            <div style="display:flex;gap:5px">
+
+            <!-- Upload + URL row -->
+            <div style="display:flex;gap:5px;margin-top:2px">
               <input type="text"
                 style="flex:1;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:6px 8px;font-size:.78rem"
-                placeholder="Paste image URL…"
+                placeholder="Paste image URL… (or upload →)"
                 .value=${this._meshyImageUrl}
-                @input=${e=>{ this._meshyImageUrl=e.target.value; this._meshyImageData=null; this._meshyImagePreview=e.target.value||null; }}
+                @input=${e=>{ this._meshyImageUrl=e.target.value; }}
                 ?disabled=${busy}>
               <button style="background:#1a3a4a;border:1px solid #1a3a4a;border-radius:4px;color:var(--text-dim);cursor:pointer;padding:0 10px;font-size:.75rem;white-space:nowrap"
                 ?disabled=${busy}
                 @click=${()=>this.shadowRoot.querySelector('#meshy-img-fu').click()}>
-                📁 Upload
+                📁 ${this._meshyImages.length ? 'Add More' : 'Upload'}
               </button>
             </div>
+            ${activeImg?.uploading ? html`<div style="font-size:.65rem;color:#8cf;margin-top:2px">⏳ Uploading…</div>` : nothing}
+            ${activeImg?.error    ? html`<div style="font-size:.65rem;color:#e05;margin-top:2px">Upload failed: ${activeImg.error}</div>` : nothing}
+            ${activeImg?.r2Url && !activeImg.uploading ? html`<div style="font-size:.65rem;color:#0d6;margin-top:2px">✅ Ready</div>` : nothing}
+
             <textarea
-              style="width:100%;min-height:44px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:6px 8px;font-size:.75rem;font-family:inherit"
+              style="width:100%;min-height:40px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:6px 8px;font-size:.75rem;font-family:inherit;margin-top:2px"
               placeholder="Optional prompt hint (e.g. 'phone stand')…"
               .value=${this._meshyPrompt}
               @input=${e=>this._meshyPrompt=e.target.value}
