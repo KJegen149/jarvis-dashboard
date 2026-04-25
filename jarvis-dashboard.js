@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.35
+// Jarvis Hub Dashboard v0.36
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -1574,10 +1574,14 @@ class JarvisDashboard extends LitElement {
           // meshy blocks from chat are no longer rendered as cards — generation is direct via ⚡ button
           if (p.type === 'meshy') return html`<span style="white-space:pre-wrap;opacity:.5;font-size:.72rem">[meshy prompt — use ⚡ Generate button]</span>`;
           if (p.type === 'svg') {
-            // Ensure root is <svg> for inline preview (Gemini sometimes uses <g> as root)
-            const svgPreviewCode = p.code.trim().toLowerCase().startsWith('<svg')
+            // Ensure root is <svg> and xmlns is present.
+            // Firefox refuses to render SVG via <img>/data: URI without xmlns="http://www.w3.org/2000/svg".
+            let svgPreviewCode = p.code.trim().toLowerCase().startsWith('<svg')
               ? p.code
               : `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${p.code}\n</svg>`;
+            if (!svgPreviewCode.includes('xmlns')) {
+              svgPreviewCode = svgPreviewCode.replace(/^(\s*<svg)(\s|>)/i, '$1 xmlns="http://www.w3.org/2000/svg"$2');
+            }
             return html`
             <div class="code-block" style="border-color:#1a4a2a">
               <div class="code-lang" style="background:#1a4a2a">✂ SVG — Cricut Design</div>
