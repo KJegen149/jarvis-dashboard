@@ -1,4 +1,4 @@
-// Jarvis Hub Dashboard v0.34
+// Jarvis Hub Dashboard v0.35
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
 // Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
 const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
@@ -1189,10 +1189,19 @@ class JarvisDashboard extends LitElement {
   }
 
   async _loadSVGFile(fileId) {
-    // Use a direct img-src URL instead of fetch() to avoid HA's connect-src CSP restriction.
-    // The ?key= query param is supported by the worker's authCheck().
-    if (this._svgUrl?.startsWith('blob:')) URL.revokeObjectURL(this._svgUrl);
-    this._svgUrl = `${this._apiUrl}/api/files/${fileId}?key=${encodeURIComponent(this._config?.api_key ?? '')}`;
+    try {
+      const r = await fetch(`${this._apiUrl}/api/files/${fileId}`, { headers: { 'X-API-Key': this._config?.api_key ?? '' } });
+      if (!r.ok) return;
+      let text = await r.text();
+      // Firefox requires xmlns="http://www.w3.org/2000/svg" when an SVG is loaded via <img>.
+      // Normalise it here so old saved files (that may lack it) render correctly.
+      if (!text.includes('xmlns') && text.trimStart().toLowerCase().startsWith('<svg')) {
+        text = text.replace(/^(\s*<svg)(\s|>)/, '$1 xmlns="http://www.w3.org/2000/svg"$2');
+      }
+      const blob = new Blob([text], { type: 'image/svg+xml' });
+      if (this._svgUrl?.startsWith('blob:')) URL.revokeObjectURL(this._svgUrl);
+      this._svgUrl = URL.createObjectURL(blob);
+    } catch (_) {}
   }
 
   async _saveSVGFromChat(svgCode) {
@@ -1204,6 +1213,10 @@ class JarvisDashboard extends LitElement {
       if (!cleanSvg.toLowerCase().startsWith('<svg')) {
         cleanSvg = `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${cleanSvg}\n</svg>`;
         this._addLog('sys', 'SVG root fixed: wrapped <g> in <svg> element');
+      } else if (!cleanSvg.includes('xmlns')) {
+        // Firefox requires xmlns="http://www.w3.org/2000/svg" when SVG is loaded via <img> tag.
+        // Gemini often omits it — inject it into the opening <svg> tag.
+        cleanSvg = cleanSvg.replace(/^<svg(\s|>)/, '<svg xmlns="http://www.w3.org/2000/svg"$1');
       }
       const blob     = new Blob([cleanSvg], { type: 'image/svg+xml' });
       const filename = `${this._activeProject.name.replace(/\s+/g,'_')}_${Date.now()}.svg`;
