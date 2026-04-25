@@ -1,12 +1,29 @@
-// Jarvis Hub Dashboard v0.36
+// Jarvis Hub Dashboard v0.37
 // Phase 2A: print pipeline wired to HoloMat API (.3mf upload → P1S).
-// Phase 2B: Meshy.AI text-to-3D generation + GLB viewer.
-const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
+// Phase 2B: Meshy.AI text-to-3D + image-to-3D (v1 API) + GLB viewer.
+// SVG: fully inline rendering via unsafeHTML — no blob/data-URI/CSP issues.
+const LIT = 'https://cdn.jsdelivr.net/gh/lit/dist@3/all/lit-all.min.js';
 const THR = 'https://esm.sh/three@0.160.0';
 
 const [litM, thrM] = await Promise.all([import(LIT), import(THR)]);
-const { LitElement, html, css, nothing } = litM;
+const { LitElement, html, css, nothing, unsafeHTML } = litM;
 const THREE = thrM;
+
+// ── SVG helpers ────────────────────────────────────────────────────────────────
+function normalizeSvg(raw) {
+  let s = raw.trim();
+  // Ensure <svg> root (not <g> or other)
+  if (!s.toLowerCase().startsWith('<svg')) {
+    s = `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${s}\n</svg>`;
+  } else if (!s.includes('xmlns')) {
+    // Firefox requires xmlns for inline SVG too (LitElement shadow DOM)
+    s = s.replace(/^(\s*<svg)(\s|>)/i, '$1 xmlns="http://www.w3.org/2000/svg"$2');
+  }
+  // Basic XSS sanitization: strip script tags and on* event handlers
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, '');
+  s = s.replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, '');
+  return s;
+}
 
 function parseSTL(buffer) {
   const dv = new DataView(buffer);
@@ -73,8 +90,9 @@ class JarvisDashboard extends LitElement {
     _meshyTab:        { state: true },   // 'text' | 'image'
     _meshyMode:       { state: true },   // 'text' | 'image' — set at generate time, used for poll/save
     _meshyImageUrl:   { state: true },   // pasted URL input
-    _meshyImages:     { state: true },   // [{preview, r2Url, uploading, error, name}] — uploaded files
+    _meshyImages:     { state: true },   // [{name, preview, dataUrl}] — local files (data URIs)
     _meshyActiveImg:  { state: true },   // index of selected image in _meshyImages
+    _svgText:         { state: true },   // raw SVG markup rendered inline (replaces blob _svgUrl)
     _svgSaving:       { state: true },
     _active3dFileId:  { state: true },
     _activeSvgFileId: { state: true },
@@ -118,9 +136,10 @@ class JarvisDashboard extends LitElement {
     this._meshyTab       = 'text';   // 'text' | 'image'
     this._meshyMode      = 'text';   // actual mode sent to API (set at generate time)
     this._meshyImageUrl  = '';       // pasted URL
-    this._meshyImages    = [];       // [{preview, r2Url, uploading, error, name}]
+    this._meshyImages    = [];       // [{name, preview, dataUrl}]
     this._meshyActiveImg = 0;
     this._meshyPollTimer = null;
+    this._svgText        = null;     // raw SVG markup for inline rendering
     this._svgSaving      = false;
     this._active3dFileId  = null;
     this._activeSvgFileId = null;
@@ -195,7 +214,7 @@ class JarvisDashboard extends LitElement {
     this._active3dFileId  = null;
     this._activeSvgFileId = null;
     this._disposeThree();
-    if (this._svgUrl) { URL.revokeObjectURL(this._svgUrl); this._svgUrl = null; }
+    this._svgText = null;
     await Promise.all([this._loadMessages(p.id), this._loadFiles(p.id)]);
     // Pick latest iteration as default (sorted oldest→newest, pick last)
     const files3d  = this._3dFilesSorted;
@@ -326,7 +345,7 @@ class JarvisDashboard extends LitElement {
           if (this._activeProject?.id === d.deleted_project_id) {
             this._activeProject = null; this._messages = []; this._files = [];
             this._disposeThree();
-            if (this._svgUrl) { URL.revokeObjectURL(this._svgUrl); this._svgUrl = null; }
+            this._svgText = null;
           }
           this._addLog('sys', 'Project deleted');
         }
@@ -549,66 +568,36 @@ class JarvisDashboard extends LitElement {
     if (!files.length) return;
     e.target.value = '';  // reset so same file can be re-added
 
-    // Build placeholder entries immediately so UI shows thumbnails right away
-    const newEntries = files.map(f => ({ name: f.name, preview: null, r2Url: null, uploading: true, error: null }));
-    const startIdx   = this._meshyImages.length;
-    this._meshyImages = [...this._meshyImages, ...newEntries];
-    this._meshyActiveImg = startIdx;  // select first of the new batch
+    // Read all files as data URLs immediately (no upload step needed —
+    // Meshy v1 image-to-3D accepts base64 data: URIs directly)
+    const startIdx = this._meshyImages.length;
+    const placeholders = files.map(f => ({ name: f.name, preview: null, dataUrl: null }));
+    this._meshyImages    = [...this._meshyImages, ...placeholders];
+    this._meshyActiveImg = startIdx;
 
-    // Load previews and upload in parallel
     files.forEach(async (file, i) => {
-      const idx = startIdx + i;
-
-      // Generate preview data URL
-      const preview = await new Promise(res => {
+      const idx    = startIdx + i;
+      const dataUrl = await new Promise(res => {
         const reader = new FileReader();
         reader.onload = ev => res(ev.target.result);
         reader.readAsDataURL(file);
       });
-
-      // Update preview
-      this._meshyImages = this._meshyImages.map((img, j) => j === idx ? { ...img, preview } : img);
-
-      // Upload raw binary to Worker → R2 → public URL
-      try {
-        const buf = await file.arrayBuffer();
-        const r = await fetch(`${this._apiUrl}/api/meshy/upload-image`, {
-          method: 'POST',
-          headers: { 'X-API-Key': this._config?.api_key ?? '', 'Content-Type': file.type || 'image/jpeg' },
-          body: buf,
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
-        this._meshyImages = this._meshyImages.map((img, j) =>
-          j === idx ? { ...img, r2Url: data.url, uploading: false } : img
-        );
-      } catch (err) {
-        this._meshyImages = this._meshyImages.map((img, j) =>
-          j === idx ? { ...img, uploading: false, error: err.message } : img
-        );
-      }
+      // preview and dataUrl are the same data URI
+      this._meshyImages = this._meshyImages.map((img, j) =>
+        j === idx ? { ...img, preview: dataUrl, dataUrl } : img
+      );
     });
   }
 
   async _startMeshyGenerate() {
     const prompt     = this._meshyPrompt.trim();
     const pastedUrl  = this._meshyImageUrl.trim();
-    // Pick the active uploaded image's R2 URL, or fall back to pasted URL
+    // Prefer uploaded file data URI, fall back to pasted URL
     const activeImg  = this._meshyImages[this._meshyActiveImg];
-    const imageUrl   = activeImg?.r2Url || pastedUrl;
+    const imageUrl   = activeImg?.dataUrl || pastedUrl;
     const usingImage = this._meshyTab === 'image' && !!imageUrl;
 
     if (!usingImage && !prompt) return;
-
-    // Check that uploaded image is done uploading
-    if (this._meshyTab === 'image' && activeImg?.uploading) {
-      this._meshyError = 'Image still uploading — please wait a moment';
-      return;
-    }
-    if (this._meshyTab === 'image' && activeImg?.error) {
-      this._meshyError = `Upload failed: ${activeImg.error}`;
-      return;
-    }
 
     if (this._meshyPollTimer) { clearInterval(this._meshyPollTimer); this._meshyPollTimer = null; }
     this._meshyStatus   = 'pending';
@@ -616,13 +605,11 @@ class JarvisDashboard extends LitElement {
     this._meshyProgress = 0;
     this._meshyTask     = null;
 
-    const body = {};
-    if (usingImage) {
-      body.image_url = imageUrl;
-      if (prompt) body.prompt = prompt;   // optional hint
-    } else {
-      body.prompt = prompt;
-    }
+    // image_url is either a data: URI (uploaded file) or a pasted public URL.
+    // Worker converts external URLs to base64 data URIs before calling Meshy v1.
+    const body = usingImage
+      ? { image_url: imageUrl, ...(prompt && { prompt }) }
+      : { prompt };
 
     const logLabel = usingImage
       ? `Meshy image-to-3D${prompt ? ` (hint: "${prompt.slice(0,40)}")` : ''}`
@@ -756,10 +743,10 @@ class JarvisDashboard extends LitElement {
     const isText  = this._meshyTab === 'text';
     const isImage = this._meshyTab === 'image';
     const activeImg   = this._meshyImages[this._meshyActiveImg];
-    const hasImage    = !!(activeImg?.r2Url || this._meshyImageUrl.trim());
+    const hasImage    = !!(activeImg?.dataUrl || this._meshyImageUrl.trim());
     const canGenerate = isText
       ? !!this._meshyPrompt.trim()
-      : hasImage && !activeImg?.uploading && !activeImg?.error;
+      : hasImage;
 
     const statusLabel = {
       idle:       '',
@@ -815,15 +802,9 @@ class JarvisDashboard extends LitElement {
                     ${img.preview
                       ? html`<img src=${img.preview} style="width:100%;height:100%;object-fit:cover">`
                       : html`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.4rem">🖼</div>`}
-                    ${img.uploading ? html`
-                      <div style="position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font-size:.6rem;color:#8cf">⏳</div>
-                    ` : img.error ? html`
-                      <div style="position:absolute;inset:0;background:rgba(180,0,0,.5);display:flex;align-items:center;justify-content:center;font-size:.6rem;color:#fff" title=${img.error}>❌</div>
-                    ` : html`
-                      <div style="position:absolute;inset:0;background:rgba(0,0,0,.25);display:flex;align-items:end;justify-content:end;padding:2px">
-                        <span style="font-size:.48rem;color:rgba(255,255,255,.5);max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${img.name}</span>
-                      </div>
-                    `}
+                    <div style="position:absolute;inset:0;background:rgba(0,0,0,.25);display:flex;align-items:end;justify-content:end;padding:2px">
+                      <span style="font-size:.48rem;color:rgba(255,255,255,.5);max-width:68px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${img.name}</span>
+                    </div>
                   </div>
                 `)}
               </div>
@@ -843,9 +824,7 @@ class JarvisDashboard extends LitElement {
                 📁 ${this._meshyImages.length ? 'Add More' : 'Upload'}
               </button>
             </div>
-            ${activeImg?.uploading ? html`<div style="font-size:.65rem;color:#8cf;margin-top:2px">⏳ Uploading…</div>` : nothing}
-            ${activeImg?.error    ? html`<div style="font-size:.65rem;color:#e05;margin-top:2px">Upload failed: ${activeImg.error}</div>` : nothing}
-            ${activeImg?.r2Url && !activeImg.uploading ? html`<div style="font-size:.65rem;color:#0d6;margin-top:2px">✅ Ready</div>` : nothing}
+            ${activeImg?.dataUrl ? html`<div style="font-size:.65rem;color:#0d6;margin-top:2px">✅ Ready to generate</div>` : nothing}
 
             <textarea
               style="width:100%;min-height:40px;resize:vertical;background:#111;color:#e8f4f8;border:1px solid #1a3a4a;border-radius:4px;padding:6px 8px;font-size:.75rem;font-family:inherit;margin-top:2px"
@@ -1192,15 +1171,8 @@ class JarvisDashboard extends LitElement {
     try {
       const r = await fetch(`${this._apiUrl}/api/files/${fileId}`, { headers: { 'X-API-Key': this._config?.api_key ?? '' } });
       if (!r.ok) return;
-      let text = await r.text();
-      // Firefox requires xmlns="http://www.w3.org/2000/svg" when an SVG is loaded via <img>.
-      // Normalise it here so old saved files (that may lack it) render correctly.
-      if (!text.includes('xmlns') && text.trimStart().toLowerCase().startsWith('<svg')) {
-        text = text.replace(/^(\s*<svg)(\s|>)/, '$1 xmlns="http://www.w3.org/2000/svg"$2');
-      }
-      const blob = new Blob([text], { type: 'image/svg+xml' });
-      if (this._svgUrl?.startsWith('blob:')) URL.revokeObjectURL(this._svgUrl);
-      this._svgUrl = URL.createObjectURL(blob);
+      const text = await r.text();
+      this._svgText = normalizeSvg(text);
     } catch (_) {}
   }
 
@@ -1208,16 +1180,7 @@ class JarvisDashboard extends LitElement {
     if (!this._activeProject || !svgCode) return;
     this._svgSaving = true;
     try {
-      // Ensure root element is <svg> — Gemini sometimes uses <g> as root
-      let cleanSvg = svgCode.trim();
-      if (!cleanSvg.toLowerCase().startsWith('<svg')) {
-        cleanSvg = `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${cleanSvg}\n</svg>`;
-        this._addLog('sys', 'SVG root fixed: wrapped <g> in <svg> element');
-      } else if (!cleanSvg.includes('xmlns')) {
-        // Firefox requires xmlns="http://www.w3.org/2000/svg" when SVG is loaded via <img> tag.
-        // Gemini often omits it — inject it into the opening <svg> tag.
-        cleanSvg = cleanSvg.replace(/^<svg(\s|>)/, '<svg xmlns="http://www.w3.org/2000/svg"$1');
-      }
+      const cleanSvg = normalizeSvg(svgCode);
       const blob     = new Blob([cleanSvg], { type: 'image/svg+xml' });
       const filename = `${this._activeProject.name.replace(/\s+/g,'_')}_${Date.now()}.svg`;
       const r = await fetch(`${this._apiUrl}/api/projects/${this._activeProject.id}/files`, {
@@ -1230,9 +1193,8 @@ class JarvisDashboard extends LitElement {
       this._files = [saved, ...this._files];
       this._activeSvgFileId = saved.id;
       this._addLog('svg', `SVG saved: ${filename}`);
-      // Show in SVG viewer immediately using the local blob — no round-trip needed
-      if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
-      this._svgUrl = URL.createObjectURL(blob);
+      // Render immediately from local text — no round-trip needed
+      this._svgText  = cleanSvg;
       this._activeView = 'svg';
     } catch (e) {
       this._addLog('error', `SVG save failed: ${e.message}`);
@@ -1251,7 +1213,7 @@ class JarvisDashboard extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     this._disposeThree();
-    if (this._svgUrl) URL.revokeObjectURL(this._svgUrl);
+    this._svgText = null;
   }
 
   // ── Styles ────────────────────────────────────────────────────────────────
@@ -1381,8 +1343,11 @@ class JarvisDashboard extends LitElement {
     .ws-idle p { font-size: .8rem; color: var(--text-dim); opacity: .6; }
     .ws-canvas-wrap { position: absolute; inset: 0; }
     #three-canvas   { width: 100%; height: 100%; display: block; }
-    .svg-viewer { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--bg); padding-bottom: 38px; }
-    .svg-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+    .svg-viewer { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--bg); padding-bottom: 38px; overflow: hidden; }
+    .svg-inline-viewer { max-width: 100%; max-height: 100%; display: flex; align-items: center; justify-content: center; }
+    .svg-inline-viewer svg { max-width: 100%; max-height: calc(100vh - 180px); width: auto; height: auto; display: block; }
+    .svg-inline-preview { padding: 8px; background: #fff; text-align: center; line-height: 0; }
+    .svg-inline-preview svg { max-width: 100%; max-height: 160px; width: auto; height: auto; display: inline-block; }
     .ws-hint { color: var(--text-dim); font-size: .82rem; text-align: center; line-height: 1.8; }
 
     /* ── Iteration navigation bar ── */
@@ -1574,26 +1539,18 @@ class JarvisDashboard extends LitElement {
           // meshy blocks from chat are no longer rendered as cards — generation is direct via ⚡ button
           if (p.type === 'meshy') return html`<span style="white-space:pre-wrap;opacity:.5;font-size:.72rem">[meshy prompt — use ⚡ Generate button]</span>`;
           if (p.type === 'svg') {
-            // Ensure root is <svg> and xmlns is present.
-            // Firefox refuses to render SVG via <img>/data: URI without xmlns="http://www.w3.org/2000/svg".
-            let svgPreviewCode = p.code.trim().toLowerCase().startsWith('<svg')
-              ? p.code
-              : `<svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">\n${p.code}\n</svg>`;
-            if (!svgPreviewCode.includes('xmlns')) {
-              svgPreviewCode = svgPreviewCode.replace(/^(\s*<svg)(\s|>)/i, '$1 xmlns="http://www.w3.org/2000/svg"$2');
-            }
+            // Render SVG inline — avoids all blob/data-URI/CSP issues entirely.
+            const svgNorm = normalizeSvg(p.code);
             return html`
             <div class="code-block" style="border-color:#1a4a2a">
               <div class="code-lang" style="background:#1a4a2a">✂ SVG — Cricut Design</div>
-              <div style="padding:8px;background:#fff;text-align:center;line-height:0">
-                <img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgPreviewCode)}"
-                     style="max-width:100%;max-height:140px;object-fit:contain"
-                     alt="SVG preview">
+              <div class="svg-inline-preview">
+                ${unsafeHTML(svgNorm)}
               </div>
               ${isJarvis ? html`
                 <button class="gen-btn" style="background:#1a4a2a"
                   ?disabled=${!hasProject || this._svgSaving}
-                  @click=${() => this._saveSVGFromChat(svgPreviewCode)}>
+                  @click=${() => this._saveSVGFromChat(svgNorm)}>
                   ${this._svgSaving ? '⏳ Saving…' : !hasProject ? '✂ Save SVG — select a project first' : '✂ Save to Project & Preview'}
                 </button>` : nothing}
             </div>`;}
@@ -1811,7 +1768,9 @@ class JarvisDashboard extends LitElement {
           <span class="in-name">${filesSvg[safeIdxS]?.filename??''}</span>
         </div>` : nothing;
       body = html`<div class="svg-viewer">
-        ${this._svgUrl?html`<img src=${this._svgUrl} alt="SVG preview">`:html`<p class="ws-hint">No SVG uploaded yet.<br>Use ⬆ Upload to add one.</p>`}
+        ${this._svgText
+          ? html`<div class="svg-inline-viewer">${unsafeHTML(this._svgText)}</div>`
+          : html`<p class="ws-hint">No SVG yet.<br>Ask Jarvis to design one — it will appear here automatically.</p>`}
         ${navSvg}
       </div>`;
     } else {
